@@ -1,5 +1,7 @@
 .venv/
+.venv-windows/
 __pycache__/
 *.py[cod]
 .env
+.ruff_cache/
 patients.csv
