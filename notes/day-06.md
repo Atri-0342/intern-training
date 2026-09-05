@@ -72,6 +72,8 @@ Changes existing data.
     UPDATE a
     SET age = 26
     WHERE id = 1;
+    
+Without `WHERE`, every row can be updated.
 
 ## DELETE
 
@@ -79,6 +81,8 @@ Deletes rows.
 
     DELETE FROM a
     WHERE id = 1;
+
+Without `WHERE`, all rows can be deleted.
 
 ## ALTER TABLE : Used to change the structure of an existing table.
 
