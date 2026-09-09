@@ -40,7 +40,7 @@ def avg_age_by_scan_type(
             ages[scan_type] = []
 
         ages[scan_type].append(age)
-
+        
     return {
         scan_type: sum(scan_ages) / len(scan_ages)
         for scan_type, scan_ages in ages.items()
