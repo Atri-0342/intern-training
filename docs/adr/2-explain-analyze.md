@@ -32,14 +32,6 @@ The plan is acceptable because the estimated 267 rows are close to the actual 28
 
 ## Query 2 — Modality + acquired_at Filter
 
-### Query
-
-    SELECT COUNT(*)
-    FROM scans
-    WHERE modality = 'MRI'
-      AND acquired_at >= '2025-06-01 00:00:00+00'
-      AND acquired_at < '2025-06-02 00:00:00+00';
-
 ### EXPLAIN ANALYZE
 
     EXPLAIN (ANALYZE, BUFFERS)
@@ -72,13 +64,6 @@ The plan is acceptable because the estimated 89 rows are very close to the actua
 
 
 ## Query 3 — WHERE + GROUP BY + Aggregate
-
-### Query
-
-    SELECT status, COUNT(*) AS scan_count
-    FROM scans
-    WHERE modality = 'CT'
-    GROUP BY status;
 
 ### EXPLAIN ANALYZE
 
@@ -118,14 +103,14 @@ The `GROUP BY` and aggregation are also handled efficiently using partial aggreg
 
 ### Query
 
-    EXPLAIN (ANALYZE, BUFFERS)
+    
+### Plan Explanation
+EXPLAIN (ANALYZE, BUFFERS)
     SELECT p.sex, COUNT(*) AS scan_count
     FROM patients p
     JOIN scans s
         ON s.patient_id = p.synthetic_study_id
     GROUP BY p.sex;
-
-### Plan Explanation
 
 - **Finalize GroupAggregate**
   - Finalizes the partial counts from the workers.
@@ -357,7 +342,7 @@ The `LIMIT 10` does **not** avoid processing all scans, because PostgreSQL must 
 
 - **Total execution time:** `136.323 ms`
 
-- **Plan acceptable:** **Yes, with a caveat.**
+- **Plan acceptable:** **Yes**
   - The query completes successfully and the hash-based strategy is reasonable.
   - The sequential scans are expected because the query examines the full `scans` table twice.
   - However, the Hash Join estimate (`66,663` vs `108,035`) is off by about `1.6×`, so it is worth observing whether statistics become more accurate after `ANALYZE`.
