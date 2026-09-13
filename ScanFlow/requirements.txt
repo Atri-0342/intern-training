@@ -3,3 +3,5 @@ ruff
 psycopg[binary]
 python-dotenv
 psycopg_pool
+sqlalchemy
+alembic
