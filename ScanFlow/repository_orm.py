@@ -2,7 +2,7 @@ import os
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
-from models import Scan
+from app.models.models import Scan
 from datetime import datetime, timezone
 
 load_dotenv()
