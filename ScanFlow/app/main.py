@@ -2,8 +2,10 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from api.patients import router as patients_router
-
+from app.api.patients import router as patients_router
+from app.api.scans import router as scans_router
+from app.api.reports import router as reports_router
+from app.api.auth import router as auth_router
 
 app = FastAPI(
     title="ScanFlow API",
@@ -15,6 +17,7 @@ async def http_exception_handler(
     request: Request,
     exc: HTTPException,
 ) -> JSONResponse:
+
     return JSONResponse(
         status_code=exc.status_code,
         content={
@@ -31,6 +34,7 @@ async def validation_exception_handler(
     request: Request,
     exc: RequestValidationError,
 ) -> JSONResponse:
+
     return JSONResponse(
         status_code=422,
         content={
@@ -55,3 +59,6 @@ app.add_exception_handler(
 
 
 app.include_router(patients_router)
+app.include_router(scans_router)
+app.include_router(reports_router)
+app.include_router(auth_router)

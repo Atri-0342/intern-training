@@ -6,3 +6,5 @@ psycopg_pool
 sqlalchemy
 alembic
 fastapi[standard]
+pwdlib[argon2]
+PyJWT

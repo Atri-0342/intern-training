@@ -1,19 +1,43 @@
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
 from uuid import UUID
 
-from db.dependencies import get_db
-from models.models import Patient
-from schemas.patient import PatientCreate, PatientResponse
-from .dependencies import pagination_params
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
 
-router = APIRouter(prefix="/v1/patients", tags=["patients"])
+from app.api.dependencies import pagination_params, require_role
+from app.db.audit import write_audit_log
+from app.db.dependencies import get_db
+from app.models.models import Patient
+from app.schemas.patient import PatientCreate, PatientResponse
 
-@router.post("", response_model=PatientResponse, status_code=201)
-def create_patient(patient: PatientCreate,db: Session=Depends(get_db)) -> PatientResponse:
-    exists=db.get(Patient,str(patient.synthetic_study_id))
+
+router = APIRouter(
+    prefix="/v1/patients",
+    tags=["patients"],
+)
+
+
+@router.post(
+    "",
+    response_model=PatientResponse,
+    status_code=201,
+)
+def create_patient(
+    patient: PatientCreate,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(require_role("clinician")),
+) -> PatientResponse:
+
+    exists = db.get(
+        Patient,
+        str(patient.synthetic_study_id),
+    )
+
     if exists is not None:
-        raise HTTPException(status_code=409,detail="Patient already exists",)
+        raise HTTPException(
+            status_code=409,
+            detail="Patient already exists",
+        )
+
     db_patient = Patient(
         synthetic_study_id=str(patient.synthetic_study_id),
         dob=patient.dob,
@@ -21,6 +45,15 @@ def create_patient(patient: PatientCreate,db: Session=Depends(get_db)) -> Patien
     )
 
     db.add(db_patient)
+
+    write_audit_log(
+        db=db,
+        action="CREATE",
+        entity="patient",
+        entity_id=str(patient.synthetic_study_id),
+        actor_id=current_user["user_id"],
+    )
+
     db.commit()
     db.refresh(db_patient)
 
@@ -30,11 +63,29 @@ def create_patient(patient: PatientCreate,db: Session=Depends(get_db)) -> Patien
         sex=db_patient.sex,
     )
 
-@router.get("/{synthetic_study_id}", response_model=PatientResponse)
-def get_patient(synthetic_study_id: UUID,db: Session = Depends(get_db)) -> PatientResponse:
-    patient = db.get(Patient,str(synthetic_study_id))
+
+@router.get(
+    "/{synthetic_study_id}",
+    response_model=PatientResponse,
+)
+def get_patient(
+    synthetic_study_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(
+        require_role("clinician", "radiologist")
+    ),
+) -> PatientResponse:
+
+    patient = db.get(
+        Patient,
+        str(synthetic_study_id),
+    )
+
     if patient is None:
-        raise HTTPException(status_code=404, detail="Patient not found")
+        raise HTTPException(
+            status_code=404,
+            detail="Patient not found",
+        )
 
     return PatientResponse(
         synthetic_study_id=patient.synthetic_study_id,
@@ -42,11 +93,19 @@ def get_patient(synthetic_study_id: UUID,db: Session = Depends(get_db)) -> Patie
         sex=patient.sex,
     )
 
-@router.get("", response_model=list[PatientResponse])
+
+@router.get(
+    "",
+    response_model=list[PatientResponse],
+)
 def list_patients(
     pagination: dict[str, int] = Depends(pagination_params),
     db: Session = Depends(get_db),
+    current_user: dict = Depends(
+        require_role("clinician", "radiologist")
+    ),
 ) -> list[PatientResponse]:
+
     limit = pagination["limit"]
     offset = pagination["offset"]
 
@@ -66,6 +125,7 @@ def list_patients(
         for patient in patients
     ]
 
+
 @router.patch(
     "/{synthetic_study_id}",
     response_model=PatientResponse,
@@ -74,6 +134,7 @@ def update_patient(
     synthetic_study_id: UUID,
     patient: PatientCreate,
     db: Session = Depends(get_db),
+    current_user: dict = Depends(require_role("clinician")),
 ) -> PatientResponse:
 
     db_patient = db.get(
@@ -90,6 +151,14 @@ def update_patient(
     db_patient.dob = patient.dob
     db_patient.sex = patient.sex
 
+    write_audit_log(
+        db=db,
+        action="UPDATE",
+        entity="patient",
+        entity_id=str(synthetic_study_id),
+        actor_id=current_user["user_id"],
+    )
+
     db.commit()
     db.refresh(db_patient)
 
@@ -99,6 +168,7 @@ def update_patient(
         sex=db_patient.sex,
     )
 
+
 @router.delete(
     "/{synthetic_study_id}",
     status_code=204,
@@ -106,6 +176,7 @@ def update_patient(
 def delete_patient(
     synthetic_study_id: UUID,
     db: Session = Depends(get_db),
+    current_user: dict = Depends(require_role("admin")),
 ) -> None:
 
     db_patient = db.get(
@@ -118,6 +189,14 @@ def delete_patient(
             status_code=404,
             detail="Patient not found",
         )
+
+    write_audit_log(
+        db=db,
+        action="DELETE",
+        entity="patient",
+        entity_id=str(synthetic_study_id),
+        actor_id=current_user["user_id"],
+    )
 
     db.delete(db_patient)
     db.commit()
