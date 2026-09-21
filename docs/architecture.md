@@ -71,3 +71,27 @@ Postgres dies. The API returns 500 on any DB call and /healthz fails. It self-re
 Object storage (the S3 emulation) is unreachable. Upload and analysis endpoints return 502/500. Recovery depends on the emulator restarting on its own; in this setup, a human is usually needed. An uploaded file is at risk only if it wasn't yet committed to a DB row.
 
 The Cloudflare Tunnel stops. The public URL goes dark immediately. It does not self-recover — it's ephemeral by design — so a human has to restart cloudflared. No data is at risk, since the tunnel is stateless.
+
+
+# Capacity estimate
+
+Back-of-envelope numbers for a single-clinic MVP deployment, to sanity-check that the single in-process worker and one Postgres instance are adequate for this phase. These are assumptions, not measurements — revisit once real usage data exists.
+
+Assumptions
+
+~75 active users total: 50 clinicians, 20 radiologists, 5 admins.
+Each clinician uploads/reviews ~5–10 scans per working day → ~300–500 scan uploads/day, concentrated in an 8-hour window.
+Peak load: roughly 3× the average rate during a mid-morning/mid-afternoon burst → ~15–20 concurrent in-flight requests at peak, well within a single FastAPI process.
+Average scan image size: ~20 MB (DICOM-derived export; varies widely by modality).
+Inference time: 3–5s simulated per scan, run serially by one asyncio worker task.
+
+Derived numbers
+
+Metric	Estimate
+Uploads/day	~300–500
+Storage growth	~6–10 GB/day → ~2–3.5 TB/year
+Worker throughput (serial, ~4s/job)	~900 jobs/hour theoretical max
+Peak analyze-queue depth	Low tens of jobs — worker keeps up with a single clinic's volume
+Postgres row growth	Negligible (structured rows only; blobs live in file storage)
+
+Where this breaks first: the single in-process asyncio worker is the ceiling. It's fine for one clinic's volume, but is explicitly not horizontally scaled — a second clinic, a batch-upload feature, or higher-resolution imaging would saturate it well before Postgres or object storage become the bottleneck. SELECT ... FOR UPDATE SKIP LOCKED was chosen specifically so more worker processes can be added later without a redesign.
