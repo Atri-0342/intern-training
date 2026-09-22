@@ -4,6 +4,7 @@ import requests
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 import asyncio
 import aiohttp
+import httpx
 
 URL = "http://127.0.0.1:8000/sleep"
 REQUEST_COUNT = 50
@@ -66,6 +67,23 @@ async def asyncio_io() -> float:
         for response in responses:
             response.raise_for_status()
             await response.read()
+
+    elapsed = time.perf_counter() - start
+    return elapsed
+
+async def asyncio_httpx_io() -> float:
+    start = time.perf_counter()
+
+    async with httpx.AsyncClient() as client:
+        tasks = [
+            client.get(URL)
+            for _ in range(REQUEST_COUNT)
+        ]
+
+        responses = await asyncio.gather(*tasks)
+
+        for response in responses:
+            response.raise_for_status()
 
     elapsed = time.perf_counter() - start
     return elapsed
@@ -154,15 +172,9 @@ if __name__ == "__main__":
 
     asyncio_elapsed = asyncio.run(asyncio_io())
     print(f"Asyncio I/O: {asyncio_elapsed:.3f} seconds")
+
+    result = asyncio.run(asyncio_httpx_io())
+    print(f"Asyncio + HTTPX I/O: {result:.3f} seconds")
+
+
     
-    cpu_sequential_elapsed = sequential_cpu()
-    print(f"Sequential CPU: {cpu_sequential_elapsed:.3f} seconds")
-
-    cpu_threaded_elapsed = threaded_cpu()
-    print(f"Threaded CPU: {cpu_threaded_elapsed:.3f} seconds")
-
-    cpu_process_elapsed = process_cpu()
-    print(f"Process CPU: {cpu_process_elapsed:.3f} seconds")
-
-    cpu_asyncio_elapsed = asyncio.run(asyncio_cpu())
-    print(f"Asyncio CPU: {cpu_asyncio_elapsed:.3f} seconds")
