@@ -6,6 +6,8 @@ from app.api.patients import router as patients_router
 from app.api.scans import router as scans_router
 from app.api.reports import router as reports_router
 from app.api.auth import router as auth_router
+from app.api import benchmark
+
 
 app = FastAPI(
     title="ScanFlow API",
@@ -62,3 +64,4 @@ app.include_router(patients_router)
 app.include_router(scans_router)
 app.include_router(reports_router)
 app.include_router(auth_router)
+app.include_router(benchmark.router)

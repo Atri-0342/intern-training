@@ -1,0 +1,7 @@
+## Async Rules
+
+Use async def when the function performs asynchronous I/O, such as using SQLAlchemy AsyncSession with asyncpg or an async HTTP client. Use plain def when using synchronous libraries such as SQLAlchemy Session; FastAPI runs normal def endpoints in a threadpool, so there is no need to make everything async. The main rule is to match the function type with the libraries being used. Blocking calls such as time.sleep(), requests.get(), or synchronous database calls should not be placed directly inside an async def because they can block the event loop.
+
+--workers starts multiple separate Uvicorn worker processes. For example, --workers 4 starts four independent processes, each with its own event loop and application state. This can improve throughput because different requests can be handled by different processes, but it does not make a single request faster.
+
+In my benchmark with 20 concurrent requests, 1 worker took 2.229s for sync and 2.590s for async. With 4 workers, sync took 1.318s and async took 1.562s. The 4-worker run was faster because multiple worker processes could handle the incoming requests in parallel. Sync was faster than async in this particular test because the benchmark was dominated by the database-side pg_sleep(1) and the synchronous FastAPI handler could also process requests concurrently through its threadpool. Async therefore had no guaranteed advantage here, and the result should be treated as an observation from this specific benchmark rather than a general rule that sync is faster than async.
