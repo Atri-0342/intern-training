@@ -91,9 +91,9 @@ async def get_analysis_status(
         confidence=job.confidence,
         findings=job.findings,
     )
-async def analysis_worker() -> None:
+async def analysis_worker(session_factory=AsyncSessionLocal) -> None:
     while True:
-        async with AsyncSessionLocal() as db:
+        async with session_factory() as db:
             result = await db.execute(
                 select(AnalysisJob)
                 .where(
