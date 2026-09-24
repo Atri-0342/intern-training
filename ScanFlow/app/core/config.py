@@ -11,6 +11,7 @@ load_dotenv(ENV_FILE)
 DB_USER = os.getenv("DB_USER")
 DB_PASSWORD = os.getenv("DB_PASSWORD")
 DB_NAME = os.getenv("DB_NAME")
+TEST_DB_NAME = os.getenv("TEST_DB_NAME")
 
 JWT_SECRET = os.getenv("JWT_SECRET")
 JWT_ALGORITHM = os.getenv("JWT_ALGORITHM")

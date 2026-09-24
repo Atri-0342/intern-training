@@ -1,17 +1,33 @@
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from fastapi.encoders import jsonable_encoder
+import asyncio
 
 from app.api.patients import router as patients_router
-from app.api.scans import router as scans_router
+from app.api.scans import router as scans_router, analysis_worker
 from app.api.reports import router as reports_router
 from app.api.auth import router as auth_router
 from app.api import benchmark
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, HTTPException, Request
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    print("ScanFlow worker starting...")
+
+    worker_task = asyncio.create_task(analysis_worker())
+
+    yield
+
+    worker_task.cancel()
+
+    print("ScanFlow worker stopping...")
 
 app = FastAPI(
     title="ScanFlow API",
     version="1.0.0",
+    lifespan=lifespan,
 )
 
 
@@ -43,7 +59,7 @@ async def validation_exception_handler(
             "error": {
                 "code": "VALIDATION_ERROR",
                 "message": "Request validation failed",
-                "details": exc.errors(),
+                "details": jsonable_encoder(exc.errors()),
             }
         },
     )

@@ -1,10 +1,13 @@
 Faker
 ruff
 psycopg[binary]
+asyncpg
 python-dotenv
 psycopg_pool
-sqlalchemy
+SQLAlchemy
 alembic
 fastapi[standard]
 pwdlib[argon2]
 PyJWT
+pytest
+pytest-cov

@@ -3,7 +3,7 @@ from datetime import date, datetime
 from sqlalchemy import CheckConstraint, Date, DateTime, ForeignKey, Index, text
 from sqlalchemy.dialects.postgresql import TEXT, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-
+from sqlalchemy import Float
 
 class Base(DeclarativeBase):
     pass
@@ -56,6 +56,66 @@ class Scan(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
 
+class AnalysisJob(Base):
+    __tablename__ = "analysis_jobs"
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('uploaded', 'pending', 'running', 'done', 'failed')",
+            name="analysis_jobs_status_check",
+        ),
+        Index(
+            "idx_analysis_jobs_status_created_at",
+            "status",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False),
+        primary_key=True,
+    )
+
+    scan_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False),
+        ForeignKey("scans.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    status: Mapped[str] = mapped_column(
+        TEXT,
+        nullable=False,
+        server_default=text("'pending'"),
+    )
+
+    retry_count: Mapped[int] = mapped_column(
+        nullable=False,
+        server_default=text("0"),
+    )
+
+    error: Mapped[str | None] = mapped_column(
+        TEXT,
+    )
+
+    confidence: Mapped[float | None] = mapped_column(
+        Float,
+    )
+
+    findings: Mapped[str | None] = mapped_column(
+        TEXT,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+    )
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+    )
 
 class Report(Base):
     __tablename__ = "reports"

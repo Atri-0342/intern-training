@@ -73,7 +73,7 @@ def create_patient(
 async def get_patient(
     synthetic_study_id: UUID,
     db: AsyncSession = Depends(get_async_db),
-    # current_user: dict = Depends(require_role("clinician", "radiologist")),
+    current_user: dict = Depends(require_role("clinician", "radiologist")),
 ) -> PatientResponse:
 
     patient = await db.get(
@@ -101,7 +101,7 @@ async def get_patient(
 async def list_patients(
     pagination: dict[str, int] = Depends(pagination_params),
     db: AsyncSession = Depends(get_async_db),
-    # current_user: dict = Depends(require_role("clinician", "radiologist")),
+    current_user: dict = Depends(require_role("clinician", "radiologist")),
 ) -> list[PatientResponse]:
 
     limit = pagination["limit"]
