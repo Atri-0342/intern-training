@@ -6,12 +6,18 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.orm import sessionmaker
 
-from app.core.config import DB_USER, DB_PASSWORD, DB_NAME
+from app.core.config import (
+    DB_USER,
+    DB_PASSWORD,
+    DB_NAME,
+    DB_HOST,
+    DB_PORT,
+)
 
 
 # Synchronous database setup
 engine = create_engine(
-    f"postgresql+psycopg://{DB_USER}:{DB_PASSWORD}@localhost:5432/{DB_NAME}",
+    f"postgresql+psycopg://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}",
     echo=True,
 )
 
@@ -23,7 +29,7 @@ SessionLocal = sessionmaker(
 
 # Asynchronous database setup
 async_engine = create_async_engine(
-    f"postgresql+asyncpg://{DB_USER}:{DB_PASSWORD}@localhost:5432/{DB_NAME}",
+    f"postgresql+asyncpg://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}",
     echo=True,
 )
 

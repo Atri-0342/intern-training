@@ -1,7 +1,10 @@
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.encoders import jsonable_encoder
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
+
 import asyncio
 
 from app.api.patients import router as patients_router
@@ -9,8 +12,8 @@ from app.api.scans import router as scans_router, analysis_worker
 from app.api.reports import router as reports_router
 from app.api.auth import router as auth_router
 from app.api import benchmark
+from app.db.dependencies import get_async_db
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, Request
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -64,7 +67,17 @@ async def validation_exception_handler(
         },
     )
 
+@app.get("/healthz")
+async def health_check(
+    db: AsyncSession = Depends(get_async_db),
+):
+    await db.execute(text("SELECT 1"))
 
+    return {
+        "status": "ok",
+        "database": "connected",
+    }
+    
 app.add_exception_handler(
     HTTPException,
     http_exception_handler,

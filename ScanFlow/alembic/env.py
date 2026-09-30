@@ -12,12 +12,13 @@ load_dotenv()
 password = os.getenv("DB_PASSWORD")
 dbname = os.getenv("DB_NAME")
 user = os.getenv("DB_USER")
-# this is the Alembic Config object, which provides
-# access to the values within the .ini file in use.
+host = os.getenv("DB_HOST")
+port = os.getenv("DB_PORT")
+
 config = context.config
 config.set_main_option(
     "sqlalchemy.url",
-    f"postgresql+psycopg://{user}:{password}@localhost:5432/{dbname}"
+    f"postgresql+psycopg://{user}:{password}@{host}:{port}/{dbname}"
 )
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.

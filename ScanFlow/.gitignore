@@ -1,14 +1,40 @@
+# Virtual environments
 .venv/
 .venv-windows/
+
+# Environment/secrets
+.env
+.env.*
+
+# Python cache
 __pycache__/
 *.py[cod]
-.env
-.ruff_cache/
+*.pyo
+*.pyd
+
+# Testing / coverage
 .pytest_cache/
-
-patients.csv
-patient.csv
-scans.csv
-
 .coverage
 htmlcov/
+
+# Ruff
+.ruff_cache/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Generated/local data
+*.csv
+
+# Certificates / local TLS
+certs/
+
+# Docker
+*.log
+
+scanflow.dump

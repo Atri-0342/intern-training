@@ -449,3 +449,13 @@ def test_analysis_job_failure_status(
     assert response.json()["status"] == "failed"
     assert response.json()["error"] == "inference failed"
     assert response.json()["retry_count"] == 3
+
+def test_healthz(clinician_client):
+    response = clinician_client.get("/healthz")
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert data["status"] == "ok"
+    assert data["database"] == "connected"
