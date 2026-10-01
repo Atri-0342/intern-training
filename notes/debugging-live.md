@@ -1,5 +1,3 @@
-# Debugging Playbook — ScanFlow
-
 ## 1. Container exits instantly on startup
 
 Check container logs:
