@@ -1,7 +1,7 @@
 from datetime import datetime
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 from sqlalchemy import select, text
@@ -29,6 +29,7 @@ router = APIRouter(
 )
 async def analyze_scan(
     scan_id: UUID,
+    request: Request,
     db: AsyncSession = Depends(get_async_db),
 ) -> AnalysisJobResponse:
     scan = await db.get(
@@ -46,6 +47,7 @@ async def analyze_scan(
         id=str(uuid4()),
         scan_id=str(scan_id),
         status="uploaded",
+        request_id=request.headers.get("X-Request-ID"),
     )
 
     db.add(job)
@@ -54,10 +56,11 @@ async def analyze_scan(
     await db.refresh(job)
 
     return AnalysisJobResponse(
-    job_id=job.id,
-    scan_id=job.scan_id,
-    status=job.status,
+        job_id=job.id,
+        scan_id=job.scan_id,
+        status=job.status,
     )
+
 
 @router.get(
     "/{scan_id}/analysis",
@@ -91,6 +94,8 @@ async def get_analysis_status(
         confidence=job.confidence,
         findings=job.findings,
     )
+
+
 async def analysis_worker(session_factory=AsyncSessionLocal) -> None:
     while True:
         async with session_factory() as db:
@@ -118,7 +123,6 @@ async def analysis_worker(session_factory=AsyncSessionLocal) -> None:
             if stale_jobs:
                 await db.commit()
 
-            # Find and claim one uploaded job
             result = await db.execute(
                 select(AnalysisJob)
                 .where(AnalysisJob.status == "uploaded")
@@ -132,13 +136,14 @@ async def analysis_worker(session_factory=AsyncSessionLocal) -> None:
                 job.status = "running"
                 await db.commit()
 
-                print(f"Processing analysis job: {job.id}")
+                print(
+                    f"Processing analysis job: {job.id} "
+                    f"request_id={job.request_id}"
+                )
 
                 try:
-                    # Simulate inference
                     await asyncio.sleep(3)
 
-                    # Synthetic analysis result
                     job.confidence = 0.94
                     job.findings = "No acute abnormality detected"
                     job.status = "done"
@@ -146,7 +151,10 @@ async def analysis_worker(session_factory=AsyncSessionLocal) -> None:
 
                     await db.commit()
 
-                    print(f"Completed analysis job: {job.id}")
+                    print(
+                        f"Completed analysis job: {job.id} "
+                        f"request_id={job.request_id}"
+                    )
 
                 except Exception as exc:
                     job.retry_count += 1
@@ -158,7 +166,7 @@ async def analysis_worker(session_factory=AsyncSessionLocal) -> None:
 
                         print(
                             f"Analysis job failed permanently: "
-                            f"{job.id}"
+                            f"{job.id} request_id={job.request_id}"
                         )
 
                     else:
@@ -167,7 +175,7 @@ async def analysis_worker(session_factory=AsyncSessionLocal) -> None:
 
                         print(
                             f"Analysis job failed, retrying: "
-                            f"{job.id} "
+                            f"{job.id} request_id={job.request_id} "
                             f"(attempt {job.retry_count})"
                         )
 

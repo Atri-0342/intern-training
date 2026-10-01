@@ -1,22 +1,3 @@
-# FROM python:3.14-slim
-
-# WORKDIR /code
-
-#COPY requirements.txt /code/requirements.txt
-
-#RUN pip install --no-cache-dir --upgrade -r /code/requirements.txt
-
-#COPY app /code/app
-
-#RUN useradd --create-home --shell /bin/bash appuser
-
-#USER appuser
-
-#CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "80"]
-
-
-
-
 FROM python:3.14-slim AS builder
 
 WORKDIR /build
@@ -53,4 +34,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
 
 ENTRYPOINT ["/code/entrypoint.sh"]
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "80"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "80", "--proxy-headers", "--forwarded-allow-ips", "172.19.0.4"]

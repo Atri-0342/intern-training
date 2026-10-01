@@ -4,9 +4,9 @@ from fastapi.responses import JSONResponse
 from fastapi.encoders import jsonable_encoder
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
-
+from fastapi.middleware.cors import CORSMiddleware
 import asyncio
-
+import logging
 from app.api.patients import router as patients_router
 from app.api.scans import router as scans_router, analysis_worker
 from app.api.reports import router as reports_router
@@ -14,6 +14,10 @@ from app.api.auth import router as auth_router
 from app.api import benchmark
 from app.db.dependencies import get_async_db
 from contextlib import asynccontextmanager
+
+
+logger = logging.getLogger("scanflow")
+logging.basicConfig(level=logging.INFO)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -32,8 +36,28 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+@app.middleware("http")
+async def log_request(request: Request, call_next):
+    request_id = request.headers.get("X-Request-ID")
 
+    response = await call_next(request)
 
+    logger.info(
+        "request_id=%s method=%s path=%s status=%s",
+        request_id,
+        request.method,
+        request.url.path,
+        response.status_code,
+    )
+
+    return response
 async def http_exception_handler(
     request: Request,
     exc: HTTPException,

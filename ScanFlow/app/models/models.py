@@ -82,6 +82,11 @@ class AnalysisJob(Base):
         nullable=False,
     )
 
+    request_id: Mapped[str | None] = mapped_column(
+        TEXT,
+        nullable=True,
+    )
+
     status: Mapped[str] = mapped_column(
         TEXT,
         nullable=False,
