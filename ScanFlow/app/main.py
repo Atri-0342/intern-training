@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi.middleware.cors import CORSMiddleware
 import asyncio
 import logging
+from fastapi.responses import StreamingResponse
 from app.api.patients import router as patients_router
 from app.api.scans import router as scans_router, analysis_worker
 from app.api.reports import router as reports_router
@@ -58,6 +59,7 @@ async def log_request(request: Request, call_next):
     )
 
     return response
+
 async def http_exception_handler(
     request: Request,
     exc: HTTPException,
@@ -101,7 +103,27 @@ async def health_check(
         "status": "ok",
         "database": "connected",
     }
-    
+
+#@app.get("/v1/debug/slow")
+#async def debug_slow(seconds: int = 30):
+ #   await asyncio.sleep(seconds)
+  #  return {"status": "completed", "seconds": seconds}
+
+#@app.get("/v1/debug/sse")
+#async def debug_sse():
+ #   async def event_stream():
+  #      for i in range(1, 11):
+   #         yield f"data: event-{i}\n\n"
+    #        await asyncio.sleep(1)
+
+#    return StreamingResponse(
+ #       event_stream(),
+  #      media_type="text/event-stream",
+   #     headers={
+    #        "Cache-Control": "no-cache",
+     #       "X-Accel-Buffering": "no",
+      #  },
+    #)
 app.add_exception_handler(
     HTTPException,
     http_exception_handler,
