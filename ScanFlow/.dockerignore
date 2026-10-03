@@ -18,5 +18,8 @@ certs/
 *.csv
 *.dump
 
+# Uploaded/local scan files
+uploads/
+
 Dockerfile
 .dockerignore

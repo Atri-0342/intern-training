@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { apiFetch } from "./api";
 
 export function ScanDetail({ scanId }) {
@@ -23,6 +23,88 @@ export function ScanDetail({ scanId }) {
             setLoading(false);
         }
     }
+useEffect(() => {
+    const controller = new AbortController();
+
+    const timerRef = useRef(null);
+    let cancelled = false;
+    let attempts = 0;
+
+    const MAX_ATTEMPTS = 10;
+    const MAX_DELAY = 15000;
+    async function pollAnalysis() {
+        if (cancelled) return;
+
+        attempts += 1;
+
+        try {
+            const data = await apiFetch(
+                `/v1/scans/${scanId}/analysis`,
+                {
+                    signal: controller.signal,
+                }
+            );
+
+            if (cancelled) return;
+
+            console.log("Analysis polling:", data);
+
+            if (data.status === "done" || data.status === "failed") {
+                console.log(
+                    `Analysis polling stopped: ${data.status}`
+                );
+                return;
+            }
+
+            if (attempts >= MAX_ATTEMPTS) {
+                console.log(
+                    "Analysis polling stopped: maximum attempts reached"
+                );
+                return;
+            }
+
+            const delay = Math.min(
+                2000 * 2 ** (attempts - 1),
+                MAX_DELAY
+            );
+
+        timerRef.current = setTimeout(pollAnalysis, delay);
+        } catch (err) {
+            if (controller.signal.aborted || cancelled) {
+                return;
+            }
+
+            console.error("Analysis polling error:", err);
+
+            if (attempts >= MAX_ATTEMPTS) {
+                console.log(
+                    "Analysis polling stopped: maximum attempts reached"
+                );
+                return;
+            }
+
+            const delay = Math.min(
+                2000 * 2 ** (attempts - 1),
+                MAX_DELAY
+            );
+
+            timerRef.current = setTimeout(pollAnalysis, delay);
+        }
+    }
+
+    pollAnalysis();
+
+    return () => {
+        cancelled = true;
+
+        if (timerRef.current) {
+          clearTimeout(timerRef.current);
+        }
+
+        controller.abort();
+    };
+}, [scanId]);
+
 
     if (loading) {
         return (
@@ -41,7 +123,11 @@ export function ScanDetail({ scanId }) {
     }
 
     if (!scan) {
-        return null;
+    return (
+        <div>
+            <p>No scan found.</p>
+        </div>
+    );
     }
 
     return (

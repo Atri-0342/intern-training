@@ -39,3 +39,4 @@ class ScanResponse(BaseModel):
     acquired_at: datetime
     uploaded_at: datetime | None
     status: str
+    file_key: str | None

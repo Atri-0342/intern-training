@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { LoginScreen } from "./LoginScreen";
 import { ScanList } from "./ScanList";
+import { UploadScreen } from "./UploadScreen";
 import {
     clearAuthToken,
     setUnauthorizedHandler,
@@ -44,7 +45,7 @@ function App() {
                 Logout
             </button>
 
-            <ScanList />
+            <UploadScreen />
         </div>
     );
 }

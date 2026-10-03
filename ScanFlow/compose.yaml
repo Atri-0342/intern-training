@@ -15,6 +15,7 @@ services:
     volumes:
       - ./app:/code/app
       - ./alembic:/code/alembic
+      - ./uploads:/code/uploads
 
     restart: unless-stopped
 

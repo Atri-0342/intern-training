@@ -11,6 +11,10 @@ CREATE TABLE scans (
     patient_id uuid NOT NULL REFERENCES patients(synthetic_study_id) ON DELETE RESTRICT,
     modality text NOT NULL CHECK (modality IN ('CT', 'MRI', 'X-ray')),
     body_part text NOT NULL,
+
+    -- Reference to the stored scan image/file
+    file_key text,
+
     acquired_at timestamptz NOT NULL,
     uploaded_at timestamptz,
     status text NOT NULL CHECK (status IN ('uploaded', 'processing', 'completed', 'failed')),
@@ -32,6 +36,10 @@ CREATE TABLE reports (
     scan_id uuid NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
     findings text NOT NULL,
     radiologist_id uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+
+    -- Reference to the stored/generated report PDF
+    pdf_key text,
+
     finalized_at timestamptz,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now()

@@ -1,4 +1,4 @@
-const BASE_URL = '';
+const BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
 
 let authToken = null;
 let unauthorizedHandler = null;
@@ -19,9 +19,12 @@ export async function apiFetch(path, options = {}) {
     const url = `${BASE_URL}${path}`;
 
     const headers = {
-        'Content-Type': 'application/json',
-        ...options.headers,
-    };
+    ...options.headers,
+};
+
+if (!(options.body instanceof FormData)) {
+    headers["Content-Type"] = "application/json";
+}
 
     if (authToken) {
         headers.Authorization = `Bearer ${authToken}`;

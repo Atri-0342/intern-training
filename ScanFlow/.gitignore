@@ -67,3 +67,6 @@ coverage/
 # IDE
 .vscode/
 .idea/
+
+# Uploaded/local scan files
+uploads/*

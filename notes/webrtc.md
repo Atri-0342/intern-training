@@ -1,0 +1,11 @@
+# WebRTC
+
+WebRTC (Web Real-Time Communication) allows web applications to establish peer-to-peer connections for real-time audio, video, screen sharing, and arbitrary data exchange between browsers. Unlike normal HTTP request/response communication, WebRTC is designed for continuous, real-time communication between peers. It can support things such as video calls, audio calls, screen sharing, and direct data channels.
+
+WebRTC still needs a server initially for **signalling**. The server helps the two peers exchange the information required to establish a connection, such as session descriptions and ICE candidates. After the peers successfully establish a suitable connection, the server does not normally need to carry the actual media because the peers can communicate directly. This reduces the amount of application data that must pass through the server.
+
+**ICE (Interactive Connectivity Establishment)** handles finding a network path between the peers. It uses **STUN** and/or **TURN** servers when necessary. **STUN** lets a client discover its public IP address and determine whether its network allows a direct connection through NAT. When a direct peer-to-peer connection cannot be established, **TURN** can relay the traffic between the peers. TURN therefore carries the actual media/data traffic when direct connectivity fails. This is why TURN can create significant real costs: the server must relay potentially large amounts of audio, video, or data traffic and therefore requires bandwidth and infrastructure.
+
+I would choose **WebRTC** when the application needs real-time peer-to-peer communication such as video calls, voice calls, screen sharing, or low-latency data exchange. I would choose **WebSocket** for persistent client-server communication where the server needs to actively receive and send messages, such as chat, live notifications, or application events. I would choose **polling** when real-time communication is not necessary and the client simply needs to periodically check the server for updated state, such as checking whether a ScanFlow analysis job has finished.
+
+The key distinction is: **polling repeatedly asks for updates, WebSocket maintains a live client-server channel, and WebRTC establishes real-time peer-to-peer communication.**

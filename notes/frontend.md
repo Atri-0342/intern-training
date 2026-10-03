@@ -32,3 +32,31 @@ This app uses in-memory storage for now, accepting "re-login on refresh"
 as the cost, rather than persisting the token anywhere XSS could read it
 at rest.
 
+## Polling Timer Leak
+
+Initially implemented analysis polling with `setInterval` inside `useEffect`
+without cleanup.
+
+Observed behavior:
+- `/v1/scans/{id}/analysis` was requested every 2 seconds.
+- Navigating away from ScanDetail did not stop the existing interval.
+- Returning to the same scan created another interval.
+- Repeating navigation caused multiple polling loops to run simultaneously.
+- The console showed repeated `Analysis polling` messages for the same scan/job.
+
+Root cause:
+The `setInterval` timer was not cleared when the component unmounted.
+
+This demonstrates why polling timers need cleanup in `useEffect`.
+
+## Polling timer: useRef instead of state
+
+The polling timer ID is stored in a `useRef` because changing the timer ID
+does not affect what the screen renders.
+
+Using state for the timer would cause an unnecessary re-render every time the
+timer ID changes. `useRef` preserves the value across renders without causing
+a render when `.current` changes.
+
+The timer ID is also needed by the effect cleanup so the scheduled timeout
+can be cancelled when the component unmounts or `scanId` changes.
