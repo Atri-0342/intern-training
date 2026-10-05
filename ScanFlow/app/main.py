@@ -1,52 +1,98 @@
-from fastapi import FastAPI, HTTPException, Request, Depends
-from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
-from fastapi.encoders import jsonable_encoder
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
-from fastapi.middleware.cors import CORSMiddleware
+from contextlib import asynccontextmanager
 import asyncio
 import logging
-from fastapi.responses import StreamingResponse
+
+from fastapi import FastAPI, HTTPException, Request, Depends
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.api.patients import router as patients_router
-from app.api.scans import router as scans_router, analysis_worker
+from app.api.scans import router as scans_router
 from app.api.reports import router as reports_router
 from app.api.auth import router as auth_router
 from app.api import benchmark
+
+from app.api.workers import (
+    router as worker_router,
+    ws_router,
+    ticket_router,
+    analysis_worker,
+)
+
 from app.db.dependencies import get_async_db
-from contextlib import asynccontextmanager
 
 
 logger = logging.getLogger("scanflow")
 logging.basicConfig(level=logging.INFO)
 
+
+# ============================================================
+# APPLICATION LIFESPAN
+# ============================================================
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("ScanFlow worker starting...")
 
-    worker_task = asyncio.create_task(analysis_worker())
+    worker_task = asyncio.create_task(
+        analysis_worker()
+    )
 
     yield
 
     worker_task.cancel()
 
+    try:
+        await worker_task
+    except asyncio.CancelledError:
+        pass
+
     print("ScanFlow worker stopping...")
+
+
+# ============================================================
+# FASTAPI APPLICATION
+# ============================================================
 
 app = FastAPI(
     title="ScanFlow API",
     version="1.0.0",
     lifespan=lifespan,
 )
+
+
+# ============================================================
+# CORS
+# ============================================================
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=[
+        "http://localhost:5173",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ============================================================
+# REQUEST LOGGING
+# ============================================================
+
 @app.middleware("http")
-async def log_request(request: Request, call_next):
-    request_id = request.headers.get("X-Request-ID")
+async def log_request(
+    request: Request,
+    call_next,
+):
+    request_id = request.headers.get(
+        "X-Request-ID"
+    )
 
     response = await call_next(request)
 
@@ -59,6 +105,11 @@ async def log_request(request: Request, call_next):
     )
 
     return response
+
+
+# ============================================================
+# HTTP EXCEPTION HANDLER
+# ============================================================
 
 async def http_exception_handler(
     request: Request,
@@ -77,6 +128,10 @@ async def http_exception_handler(
     )
 
 
+# ============================================================
+# VALIDATION EXCEPTION HANDLER
+# ============================================================
+
 async def validation_exception_handler(
     request: Request,
     exc: RequestValidationError,
@@ -88,42 +143,36 @@ async def validation_exception_handler(
             "error": {
                 "code": "VALIDATION_ERROR",
                 "message": "Request validation failed",
-                "details": jsonable_encoder(exc.errors()),
+                "details": jsonable_encoder(
+                    exc.errors()
+                ),
             }
         },
     )
+
+
+# ============================================================
+# HEALTH CHECK
+# ============================================================
 
 @app.get("/healthz")
 async def health_check(
     db: AsyncSession = Depends(get_async_db),
 ):
-    await db.execute(text("SELECT 1"))
+    await db.execute(
+        text("SELECT 1")
+    )
 
     return {
         "status": "ok",
         "database": "connected",
     }
 
-#@app.get("/v1/debug/slow")
-#async def debug_slow(seconds: int = 30):
- #   await asyncio.sleep(seconds)
-  #  return {"status": "completed", "seconds": seconds}
 
-#@app.get("/v1/debug/sse")
-#async def debug_sse():
- #   async def event_stream():
-  #      for i in range(1, 11):
-   #         yield f"data: event-{i}\n\n"
-    #        await asyncio.sleep(1)
+# ============================================================
+# EXCEPTION HANDLERS
+# ============================================================
 
-#    return StreamingResponse(
- #       event_stream(),
-  #      media_type="text/event-stream",
-   #     headers={
-    #        "Cache-Control": "no-cache",
-     #       "X-Accel-Buffering": "no",
-      #  },
-    #)
 app.add_exception_handler(
     HTTPException,
     http_exception_handler,
@@ -135,8 +184,30 @@ app.add_exception_handler(
 )
 
 
-app.include_router(patients_router)
-app.include_router(scans_router)
-app.include_router(reports_router)
-app.include_router(auth_router)
-app.include_router(benchmark.router)
+# ============================================================
+# ROUTERS
+# ============================================================
+
+app.include_router(
+    patients_router
+)
+
+app.include_router(
+    scans_router
+)
+
+app.include_router(
+    reports_router
+)
+
+app.include_router(
+    auth_router
+)
+
+app.include_router(
+    benchmark.router
+)
+
+app.include_router(worker_router)
+app.include_router(ws_router)
+app.include_router(ticket_router)

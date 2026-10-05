@@ -44,8 +44,8 @@ function App() {
             <button onClick={handleLogout}>
                 Logout
             </button>
-
-            <UploadScreen />
+            <ScanList />
+            {/* <UploadScreen /> */}
         </div>
     );
 }

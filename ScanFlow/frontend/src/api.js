@@ -40,17 +40,30 @@ if (!(options.body instanceof FormData)) {
     }
 
     if (response.status === 401) {
-        clearAuthToken();
-        if (unauthorizedHandler) unauthorizedHandler();
-        throw new Error('Unauthorized');
+    clearAuthToken();
+
+    if (unauthorizedHandler) {
+        unauthorizedHandler();
     }
 
+    const error = new Error("Unauthorized");
+    error.status = 401;
+
+    throw error;
+}
+
+
     if (!response.ok) {
-        throw new Error(
-            data?.error?.message ||
-            `Request failed with status ${response.status}`
-        );
-    }
+    const error = new Error(
+        data?.error?.message ||
+        data?.detail ||
+        `Request failed with status ${response.status}`
+    );
+
+    error.status = response.status;
+
+    throw error;
+}
 
     return data;
 }

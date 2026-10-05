@@ -12,3 +12,4 @@ PyJWT
 pytest
 pytest-cov
 greenlet
+websockets
