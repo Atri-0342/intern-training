@@ -1,303 +1,1010 @@
 # ScanFlow — System Architecture
 
-Radiology scan intake and analysis API. Requirements were settled in prose before any diagram was drawn — the diagrams below are a picture of those decisions, not a substitute for them.
+> **Day 38 architecture review**
+>
+> This document preserves the original architecture decisions from Day 16 and records how the implementation evolved. The historical design is not deleted or rewritten as if it never existed. Instead, each important divergence is identified and the current architecture is documented separately.
+>
+> **Current implementation:** React frontend → Cloudflare Tunnel → Nginx → FastAPI → PostgreSQL + mounted local scan storage, with an in-process analysis worker and WebSocket status delivery.
+>
+> **Future storage migration:** S3-compatible storage through boto3, tested locally with moto. S3 is not the current production storage implementation.
 
-## Table of contents
-1. [Overview](#1-overview)
-2. [Who uses it, and in which role](#2-who-uses-it-and-in-which-role)
-3. [Components — this phase vs. later](#3-components--this-phase-vs-later)
-4. [Where data lives, and where files live](#4-where-data-lives-and-where-files-live)
-5. [Inside the request vs. afterwards](#5-inside-the-request-vs-afterwards)
-6. [Diagram — system context (C4 level 1)](#6-diagram--system-context-c4-level-1)
-7. [Diagram — containers (C4 level 2)](#7-diagram--containers-c4-level-2)
-8. [Sequence — upload → analyze → retrieve](#8-sequence--upload--analyze--retrieve)
-9. [Sequence — analysis fails and is retried](#9-sequence--analysis-fails-and-is-retried)
-10. [Capacity estimate](#10-capacity-estimate)
-11. [Failure modes](#11-failure-modes)
+---
 
-## 1. Overview
+# 1. Historical Design — Day 16
 
-ScanFlow lets clinical staff upload radiology scans, have them analyzed, and read the resulting reports. It's one API behind one authentication scheme, backed by a relational store for structured data, blob storage for files, and a background worker for the one operation too slow to run inside a request.
+The Day 16 design established the original architectural direction for ScanFlow:
 
-This document is written in the order the system was actually decided: who uses it, what it's made of and when each part gets built, where data lives, and which operations are synchronous — in that order, because that last question is what determines the API surface, not the other way round.
+- REST API under `/v1`.
+- FastAPI backend.
+- JWT authentication and role-based authorization.
+- PostgreSQL for structured data.
+- Scan files separated from structured database data.
+- Asynchronous analysis instead of blocking the upload request.
+- Background worker for analysis.
+- Containerized deployment.
+- Nginx/reverse proxy and external access were planned as the system evolved.
+- Object storage such as S3 was considered the longer-term direction for scan files.
+- Capacity and failure modes were considered before production scale.
 
-## 2. Who uses it, and in which role
+This original design remains useful as the baseline for comparing what was eventually implemented.
 
-Three roles use ScanFlow. All three authenticate through the same scheme; authorization is enforced per-endpoint, not by standing up separate systems per role.
+---
 
-- **Clinician** — uploads scans, checks scan status, and reads finalized reports. This is the role that generates the most traffic.
-- **Radiologist** — does everything a clinician can do, plus finalizes reports. It's the only role that can move a report from draft to final.
-- **Admin** — manages user accounts, and deliberately has no special access to clinical data. Administering the system and reading patient data are treated as different privileges.
+# 2. Day 16 → Current Implementation Divergences
 
-There is no anonymous or public role. Every request is made by an authenticated user acting in exactly one of these three roles.
+## 2.1 Database
 
-## 3. Components — this phase vs. later
+### Originally planned
 
-Five components make up the system. Only the first two exist in the current build phase; the API is deliberately shaped now so the rest can be added without renegotiating the endpoints later.
+The early architecture described an initial in-memory implementation and PostgreSQL as a later persistence component.
 
-**Built now:**
-- The FastAPI app itself — patients and scans endpoints — backed by in-memory storage.
+### Current
 
-**Added later, in this order:**
-1. Real Postgres, replacing the in-memory store.
-2. Auth (JWT, roles), added once storage is real.
-3. The analysis worker — an async job pipeline, running as an in-process asyncio task that claims work via `SELECT ... FOR UPDATE SKIP LOCKED`.
-4. A reverse proxy and containerization — Nginx and Docker Compose, exposed through a Cloudflare Tunnel.
-5. File storage on the real object-storage API — S3, emulated via moto/LocalStack.
+PostgreSQL is now an actual running service in Docker Compose.
 
-The worker, the proxy, and object storage are named here on purpose — so the API leaves room for them — but nothing behind that line is implemented in this phase.
+```text
+FastAPI
+   │
+   ▼
+PostgreSQL 17
+```
 
-## 4. Where data lives, and where files live
+The API now persists patients, scans, analysis jobs/results, users, and audit information.
 
-Structured data and files are two different kinds of data, and they don't share a home.
+---
 
-- **Structured data** — patients, scans, reports, users, audit log — is the system of record and lives in Postgres. Anything that gets queried, filtered, or joined belongs here.
-- **Files** — the scan image itself, and any report PDF — do not belong in a database row. They live on disk (a mounted volume early on, the S3 API once that phase lands), and the corresponding `scans` / `reports` row holds only a path or object key. A row carrying a multi-megabyte blob is the wrong shape for every query that doesn't need the blob.
+## 2.2 Authentication and authorization
 
-## 5. Inside the request vs. afterwards
+### Originally planned
 
-This is the decision that shapes the whole API surface, made explicitly rather than discovered by accident once the worker exists.
+JWT authentication and role-based access control were part of the API design.
 
-**Inside the request (synchronous)** — anything the caller needs confirmed before moving on: validating and persisting a patient or scan record, storing an uploaded file, authenticating. These stay synchronous because they're fast, and the caller has nothing useful to do until they're done.
+### Current
 
-**After the request returns (asynchronous, handed to the worker)** — running analysis on a scan. Inference is slow (3–5+ seconds, simulated), and holding an HTTP connection open for that is the wrong shape. So `POST /v1/scans/{id}/analyze` returns `202 Accepted` with a job id — "I've accepted this and will do it" — not `200` with a result. Patients and scans CRUD stay synchronous; there's no reason to make a caller poll for something that takes milliseconds.
+Authentication and authorization are implemented.
 
-## 6. Diagram — system context (C4 level 1)
+Current roles:
 
-Who talks to the system, and what it talks to. Solid relationships are wired in the current phase; the worker is named for the API's sake but built later.
+- `clinician`
+- `radiologist`
+- `admin`
+
+Protected endpoints use the authenticated user and role checks.
+
+---
+
+## 2.3 Nginx
+
+### Originally planned
+
+Nginx/reverse proxy was part of the later infrastructure design.
+
+### Current
+
+Nginx is running in Docker Compose.
+
+The current path is:
+
+```text
+Browser
+   ↓
+Nginx :80
+   ↓
+FastAPI
+```
+
+The host mapping is:
+
+```text
+localhost:8000 → Nginx:80
+```
+
+Nginx also serves the frontend static files.
+
+---
+
+## 2.4 Docker Compose
+
+### Originally planned
+
+Containerization was part of the evolution of the project.
+
+### Current
+
+The running Compose stack contains:
+
+```text
+api
+db
+nginx
+```
+
+with PostgreSQL backed by a Docker volume.
+
+The analysis worker currently runs inside the FastAPI API process rather than as a separate worker container.
+
+---
+
+## 2.5 Cloudflare Tunnel
+
+### Originally planned
+
+External access was a later infrastructure concern.
+
+### Current
+
+Cloudflare Tunnel has been configured and verified.
+
+The public path is effectively:
+
+```text
+Browser
+   ↓
+Cloudflare Tunnel
+   ↓
+Nginx
+   ↓
+FastAPI
+```
+
+WebSocket traffic through the tunnel was also verified.
+
+---
+
+## 2.6 Scan file storage
+
+### Originally planned
+
+The architecture separated scan files from structured PostgreSQL data and identified object storage/S3 as the longer-term direction.
+
+### Current
+
+Files are currently stored on the mounted local volume:
+
+```text
+uploads/scans/
+```
+
+PostgreSQL stores the generated file key, for example:
+
+```text
+scans/<scan-id>.pdf
+```
+
+The database does not store the scan binary.
+
+### Later
+
+Day 38 moves this storage implementation toward:
+
+```text
+FastAPI
+   ↓
+boto3
+   ↓
+S3-compatible API
+   ↓
+moto for tests
+```
+
+This is a **future migration**, not the current storage architecture.
+
+---
+
+## 2.7 Upload validation
+
+### Originally planned
+
+The early API design specified scan upload but did not contain all of the validation that was eventually implemented.
+
+### Current
+
+Uploads accept:
+
+```text
+image/jpeg
+image/png
+application/pdf
+```
+
+Maximum size:
+
+```text
+20 MB
+```
+
+The implementation also removes a partially written file if an exception occurs during upload.
+
+---
+
+## 2.8 Upload endpoint
+
+### Originally designed
+
+```http
+POST /v1/scans
+```
+
+### Current
+
+```http
+POST /v1/scans/upload
+```
+
+The current upload requires:
+
+```text
+patient_id
+modality
+body_part
+acquired_at
+file
+```
+
+---
+
+## 2.9 File field
+
+### Originally designed
+
+The API documentation referred to a file path.
+
+### Current
+
+The API returns:
+
+```json
+{
+  "file_key": "scans/<scan-id>.pdf"
+}
+```
+
+The application exposes a storage key rather than exposing its local filesystem path.
+
+---
+
+## 2.10 Analysis worker
+
+### Originally planned
+
+A background worker was planned for asynchronous analysis.
+
+### Current
+
+An actual in-process worker exists.
+
+The worker:
+
+1. Finds available jobs.
+2. Claims jobs using PostgreSQL row locking.
+3. Sets the job to `running`.
+4. Performs the simulated analysis.
+5. Writes the result.
+6. Broadcasts the status.
+7. Handles retries/failures.
+
+Job claiming uses:
+
+```sql
+FOR UPDATE SKIP LOCKED
+```
+
+---
+
+## 2.11 Analysis lifecycle
+
+### Originally documented
+
+The early API design used a `pending` state.
+
+### Current
+
+The actual lifecycle is:
+
+```text
+uploaded
+    ↓
+running
+    ↓
+done
+```
+
+or:
+
+```text
+uploaded
+    ↓
+running
+    ↓
+failed
+```
+
+The worker also has stale-running-job recovery.
+
+---
+
+## 2.12 Worker recovery
+
+### Originally
+
+A worker failure could leave a job stuck in `running`.
+
+### Current
+
+The worker detects stale running jobs and can return them to a retryable state.
+
+This means the current architecture is more resilient than the original design.
+
+---
+
+## 2.13 WebSocket status delivery
+
+### Originally
+
+The API design primarily relied on HTTP polling for analysis status.
+
+### Current
+
+A WebSocket status path has been implemented:
+
+```text
+POST /v1/ws/tickets
+          ↓
+short-lived ticket
+          ↓
+WS /v1/ws/scans/{id}
+          ↓
+running / done / failed events
+```
+
+The worker broadcasts analysis transitions to connected clients.
+
+---
+
+## 2.14 WebSocket authentication
+
+### Originally
+
+There was no completed WebSocket ticket mechanism in the Day 16/27 API contract.
+
+### Current
+
+The browser does not put the normal JWT into the WebSocket URL.
+
+Instead:
+
+```text
+Authenticated HTTP request
+          ↓
+POST /v1/ws/tickets
+          ↓
+single-use ticket
+          ↓
+WebSocket connection
+```
+
+The ticket is short-lived, approximately 30 seconds, and bound to the authorized user/scan context.
+
+---
+
+## 2.15 WebSocket process limitation
+
+### Current limitation
+
+The connection manager is process-local.
+
+One API process can broadcast to sockets connected to that process.
+
+If the API is later scaled across multiple processes/containers, broadcasts will need shared infrastructure.
+
+### Future production direction
+
+A shared broker such as Redis Pub/Sub could distribute events across processes.
+
+Redis is intentionally **not being built for the current training task**.
+
+---
+
+## 2.16 Frontend polling
+
+### Originally
+
+Polling was the primary analysis-status mechanism.
+
+### Current
+
+WebSocket is available for live status delivery, but HTTP polling remains as a fallback and measurement path.
+
+The polling implementation uses increasing delays:
+
+```text
+2s
+4s
+8s
+15s maximum
+```
+
+It stops on:
+
+- `done`
+- `failed`
+- component unmount
+- maximum attempts
+
+---
+
+## 2.17 WebSocket resilience
+
+The frontend now handles:
+
+- unexpected disconnects
+- exponential reconnect backoff
+- reconnect ceiling
+- terminal-state stopping
+- offline → online recovery
+- background → foreground recovery
+- cleanup when the component unmounts
+
+These behaviors were not part of the original Day 16 architecture.
+
+---
+
+## 2.18 Nginx WebSocket configuration
+
+Nginx now explicitly supports WebSocket upgrade:
+
+```nginx
+location /v1/ws/ {
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Request-ID $request_id;
+    proxy_read_timeout 300s;
+    proxy_send_timeout 30s;
+    proxy_pass http://api:80;
+}
+```
+
+This is now part of the real deployment path.
+
+---
+
+## 2.19 Audit logging
+
+The current scan upload flow writes an audit record when the scan is created.
+
+The audit entry records:
+
+```text
+action
+entity
+entity_id
+actor_id
+```
+
+This is now part of the actual persistence flow.
+
+---
+
+# 3. Current System
+
+The architecture that actually exists today is:
+
+```text
+                         Internet
+                            │
+                            ▼
+                   Cloudflare Tunnel
+                            │
+                            ▼
+                         Nginx
+                      /          \
+                     /            \
+                    ▼              ▼
+             React frontend     FastAPI
+                                  │
+                    ┌─────────────┼─────────────┐
+                    │             │             │
+                    ▼             ▼             ▼
+               PostgreSQL    Local uploads    Analysis
+                                              worker
+                                                 │
+                                                 ▼
+                                         WebSocket manager
+                                                 │
+                                                 ▼
+                                              Browser
+```
+
+The current system is therefore no longer the original simple in-memory API design.
+
+---
+
+# 4. Current Components
+
+## 4.1 React frontend
+
+Responsibilities:
+
+- user interface
+- authentication interaction
+- patient/scan operations
+- analysis status display
+- WebSocket connection/reconnection
+- polling fallback
+
+---
+
+## 4.2 Cloudflare Tunnel
+
+Provides external access to the local deployment.
+
+It also supports the WebSocket path that was verified during Day 37.
+
+---
+
+## 4.3 Nginx
+
+Responsibilities:
+
+- frontend static file serving
+- HTTP reverse proxy
+- WebSocket upgrade
+- request forwarding
+- timeout configuration
+
+---
+
+## 4.4 FastAPI
+
+Responsibilities:
+
+- authentication
+- authorization
+- patients
+- scans
+- uploads
+- analysis jobs
+- WebSocket tickets
+- WebSocket connections
+- audit logging
+
+---
+
+## 4.5 PostgreSQL
+
+Stores structured application state:
+
+- users
+- patients
+- scans
+- analysis jobs/results
+- audit records
+
+---
+
+## 4.6 Local mounted storage
+
+Stores the uploaded scan binaries.
+
+Current location:
+
+```text
+uploads/scans/
+```
+
+PostgreSQL stores only the corresponding key.
+
+---
+
+## 4.7 Analysis worker
+
+The worker is currently in-process.
+
+It:
+
+- claims jobs
+- updates status
+- performs analysis
+- stores results
+- retries failures
+- recovers stale jobs
+- broadcasts status events
+
+---
+
+# 5. Data Storage
+
+```text
+                ScanFlow
+                   │
+          ┌────────┴────────┐
+          │                 │
+          ▼                 ▼
+     PostgreSQL        Mounted volume
+          │                 │
+          │                 └── scan image/PDF
+          │
+          ├── patient data
+          ├── scan metadata
+          ├── analysis jobs
+          ├── analysis results
+          ├── users
+          └── audit records
+```
+
+The database stores:
+
+```text
+file_key = scans/<uuid>.<extension>
+```
+
+not the actual scan binary.
+
+---
+
+# 6. Synchronous vs Asynchronous Work
+
+## Synchronous
+
+The HTTP request handles:
+
+- authentication
+- authorization
+- validation
+- metadata persistence
+- scan file write
+- audit logging
+
+## Asynchronous
+
+Analysis runs after the HTTP request:
+
+```text
+POST /v1/scans/{id}/analyze
+              ↓
+        create job
+              ↓
+        HTTP 202
+              ↓
+        worker claims job
+              ↓
+           running
+              ↓
+             done
+```
+
+---
+
+# 7. Current System Context Diagram
 
 ```mermaid
 C4Context
-  title ScanFlow — System Context (C4 Level 1)
+    title ScanFlow — Current System Context
 
-  Person(clinician, "Clinician", "Uploads scans, checks status, reads finalized reports")
-  Person(radiologist, "Radiologist", "All clinician actions, plus finalizes reports")
-  Person(admin, "Admin", "Manages user accounts; no clinical data access")
+    Person(clinician, "Clinician", "Uploads scans and monitors analysis")
+    Person(radiologist, "Radiologist", "Reviews clinical scan/report information")
+    Person(admin, "Admin", "Performs administrative operations")
 
-  System(scanflow, "ScanFlow API", "FastAPI app: patients + scans, in-memory -> Postgres")
-  SystemDb(postgres, "Postgres", "Structured data: patients, scans, reports, users, audit log")
-  System_Ext(filestore, "File storage", "Scan images, report PDFs")
-  System_Ext(worker, "Analysis worker", "Added later")
+    System(scanflow, "ScanFlow", "Radiology scan intake and analysis system")
 
-  Rel(clinician, scanflow, "Uses", "HTTPS")
-  Rel(radiologist, scanflow, "Uses", "HTTPS")
-  Rel(admin, scanflow, "Uses", "HTTPS")
-
-  Rel(scanflow, postgres, "CRUD, inside the request")
-  Rel(scanflow, filestore, "store / retrieve, inside the request")
-  Rel(scanflow, worker, "hand off, after the request returns")
-  Rel(worker, postgres, "writes result back")
-
-  UpdateLayoutConfig("landscape")
+    Rel(clinician, scanflow, "Uses")
+    Rel(radiologist, scanflow, "Uses")
+    Rel(admin, scanflow, "Uses")
 ```
 
-## 7. Diagram — containers (C4 level 2)
+---
 
-The fuller picture, once the reverse proxy, worker, and public tunnel are in place.
+# 8. Current Container Diagram
 
 ```mermaid
 C4Container
-  title ScanFlow — Containers (C4 Level 2)
+    title ScanFlow — Current Containers
 
-  Person(user, "Clinician / Radiologist / Admin", "Browser user")
+    Person(user, "Clinical/Admin User", "Browser")
 
-  System_Boundary(edge, "Edge — public internet") {
-    System_Ext(tunnel, "Cloudflare Tunnel", "Terminates public TLS")
-  }
+    System_Ext(cloudflare, "Cloudflare Tunnel", "Public tunnel")
 
-  System_Boundary(compose, "Docker Compose stack") {
-    Container(spa, "React SPA", "Browser bundle", "Static frontend")
-    Container(nginx, "Nginx", "Reverse proxy", "Static files, rate limiting, WS upgrade")
-    Container(api, "FastAPI app", "Python / FastAPI", "auth, patients, scans, reports")
-    Container(worker, "Async worker", "in-process asyncio task", "SELECT ... FOR UPDATE SKIP LOCKED")
-    ContainerDb(db, "PostgreSQL", "Relational DB", "patients, scans, reports, users, audit_log")
+    Container(frontend, "React Frontend", "React", "Browser application")
+    Container(nginx, "Nginx", "Nginx", "Static serving, reverse proxy and WebSocket upgrade")
+    Container(api, "FastAPI API", "Python / FastAPI", "Application API")
+    Container(worker, "Analysis Worker", "In-process Python task", "Claims and processes analysis jobs")
+    ContainerDb(postgres, "PostgreSQL", "PostgreSQL", "Structured application data")
+    ContainerDb(files, "Mounted Scan Storage", "Filesystem", "Uploaded scan binaries")
 
-    System_Boundary(emulated, "Emulated external service") {
-      ContainerDb(s3, "S3 API", "moto / LocalStack", "Scan images, report PDFs")
-    }
-  }
-
-  Rel(user, tunnel, "HTTPS")
-  Rel(tunnel, nginx, "HTTP :80")
-  Rel(nginx, spa, "/ static bundle")
-  Rel(nginx, api, "/v1/* proxy_pass")
-  Rel(nginx, api, "/v1/ws/* Upgrade: websocket")
-
-  Rel(api, db, "SQL over asyncpg")
-  Rel(api, worker, "enqueue via claim query")
-  Rel(worker, db, "claim next pending scan / write result")
-  Rel(api, s3, "read/write objects")
-  Rel(api, user, "push status over WS")
-
-  UpdateLayoutConfig("landscape")
+    Rel(user, cloudflare, "HTTPS")
+    Rel(cloudflare, nginx, "HTTP / WebSocket")
+    Rel(nginx, frontend, "Serves frontend")
+    Rel(nginx, api, "HTTP /v1/*")
+    Rel(nginx, api, "WebSocket /v1/ws/*")
+    Rel(api, postgres, "SQL")
+    Rel(api, files, "Writes scan files")
+    Rel(api, worker, "Creates analysis jobs")
+    Rel(worker, postgres, "Claims jobs and writes results")
+    Rel(worker, api, "Broadcasts through process-local WS manager")
 ```
 
-## 8. Sequence — upload → analyze → retrieve
+---
+
+# 9. Upload → Analyze → WebSocket Sequence
 
 ```mermaid
 sequenceDiagram
     autonumber
-    actor C as Clinician (browser)
+
+    actor B as Browser
+    participant CF as Cloudflare Tunnel
     participant N as Nginx
-    participant F as FastAPI
-    participant P as Postgres
-    participant S as S3 (moto)
-    participant W as Async worker
+    participant A as FastAPI
+    participant DB as PostgreSQL
+    participant FS as Mounted Storage
+    participant W as Analysis Worker
 
-    C->>N: POST /v1/auth/token
-    N->>F: proxy_pass
-    F->>P: verify user, hashed password
-    F-->>C: 200 { JWT }
+    B->>CF: POST /v1/scans/upload
+    CF->>N: Forward request
+    N->>A: Forward request
 
-    C->>N: POST /v1/scans/upload (Bearer JWT)
-    N->>F: proxy_pass
-    F->>S: PutObject (scan image)
-    F->>P: INSERT scans, audit_log (one transaction)
-    F-->>C: 201 { scan_id, status: pending }
+    A->>A: Validate content type and size
+    A->>FS: Write scan file
+    A->>DB: Insert scan + audit log
+    A-->>B: 201 ScanResponse
 
-    C->>N: POST /v1/scans/{id}/analyze
-    N->>F: proxy_pass
-    F->>P: mark scan queued
-    F-->>C: 202 { job_id }
+    B->>CF: POST /v1/scans/{id}/analyze
+    CF->>N: Forward request
+    N->>A: Forward request
+    A->>DB: Create analysis job
+    A-->>B: 202 {status: uploaded}
 
-    loop worker polls for work
-        W->>P: SELECT ... FOR UPDATE SKIP LOCKED
-        P-->>W: claimed scan row
-        Note right of W: simulate inference (3–5s)
-        W->>P: write result, status: done
-        W-->>C: WS push — status: done (/v1/ws/scans/{id})
-    end
+    B->>CF: POST /v1/ws/tickets
+    CF->>N: Forward request
+    N->>A: Forward request
+    A-->>B: Short-lived single-use ticket
 
-    C->>N: GET /v1/scans/{id}/analysis
-    N->>F: proxy_pass
-    F->>P: SELECT result
-    F-->>C: 200 { confidence, findings }
+    B->>CF: WS /v1/ws/scans/{id}
+    CF->>N: WebSocket upgrade
+    N->>A: WebSocket upgrade
+    A-->>B: Connected
+
+    W->>DB: Claim uploaded job
+    W->>DB: Set status = running
+    W-->>B: WS running event
+
+    Note right of W: Simulated analysis
+
+    W->>DB: Store result + status = done
+    W-->>B: WS done event
+
+    B->>CF: GET /v1/scans/{id}/analysis
+    CF->>N: Forward
+    N->>A: Forward
+    A->>DB: Read latest job
+    A-->>B: Analysis result
 ```
 
-## 9. Sequence — analysis fails and is retried
+---
+
+# 10. Failure and Retry Sequence
 
 ```mermaid
 sequenceDiagram
     autonumber
-    actor C as Clinician (browser)
-    participant F as FastAPI
-    participant P as Postgres
-    participant W as Async worker
 
-    C->>F: POST /v1/scans/{id}/analyze
-    F->>P: mark scan queued
-    F-->>C: 202 { job_id }
+    participant W as Worker
+    participant DB as PostgreSQL
+    participant B as Browser
 
-    W->>P: SELECT ... FOR UPDATE SKIP LOCKED
-    P-->>W: claimed scan row
-    Note right of W: inference raises exception
-    W->>P: status: failed, retry_count += 1, error recorded
+    W->>DB: Claim uploaded job
+    W->>DB: Set running
+    W-->>B: running
 
-    C->>F: GET /v1/scans/{id}/analysis
-    F-->>C: 200 { status: failed, retry_count: 1 }
+    Note right of W: Processing fails
 
-    C->>F: POST /v1/scans/{id}/analyze (retry)
-    F->>P: mark scan queued again
-    W->>P: SELECT ... FOR UPDATE SKIP LOCKED
-    P-->>W: claimed scan row
-    Note right of W: inference succeeds
-    W->>P: status: done, result written
-    W-->>C: WS push — status: done
+    W->>DB: Record failure/retry state
+
+    alt Retry available
+        W->>DB: Claim retryable job
+        W->>DB: Set running
+        W->>DB: Store successful result
+        W-->>B: done
+    else Retry limit reached
+        W->>DB: Set failed
+        W-->>B: failed
+    end
 ```
 
-## 10. Capacity estimate
+---
 
-Two scenarios, same method: state assumptions, do the arithmetic, find where it breaks. The point of this exercise is the arithmetic being visible and checkable, not the final numbers being precise — every number here is a stated assumption, not a measurement.
+# 11. WebSocket Authentication Flow
 
-### 10.1 Shared assumptions (both scenarios)
+```mermaid
+sequenceDiagram
+    autonumber
 
-- **Requests per scan journey:** 1 upload + 1 analyze request + 2 status/result polls ≈ **5 requests/scan** (auth is once per session and is amortized away — ignored here).
-- **Daily traffic shape:** clinical upload volume is not uniform across the day. Assume **30% of daily volume lands in the single busiest hour** (a morning rush), and within that hour, arrivals burst at up to **3× the hour's own average rate**.
-- **File sizes:** scan image ≈ **20 MB** average (DICOM-derived export); a finalized report PDF ≈ **0.5 MB**, produced for **80% of scans** (some scans don't reach a finalized report). Average bytes stored per scan = 20 MB + (0.8 × 0.5 MB) = **20.4 MB/scan**.
-- **Operating pattern:** facility takes scans **365 days/year** (hospital-style, not a 5-day clinic).
-- **Inference time:** 3–5s simulated; use **4s** as the average for arithmetic.
-- **Worker model:** exactly one in-process asyncio task, processing jobs **serially** — no concurrency within the worker.
-- **Row multipliers per scan:** 1 `scans` row; 0.8 `reports` rows (finalized only); 0.25 new `patients` rows (assume 1 new patient per 4 scans — the rest are returning patients); 4 `audit_log` rows (upload, analyze-request, analyze-result, retrieve).
+    actor B as Browser
+    participant A as FastAPI
 
-### 10.2 Scenario A — 200 scans/day
+    B->>A: Authenticated POST /v1/ws/tickets
+    A->>A: Validate JWT and authorization
+    A->>A: Create short-lived single-use ticket
+    A-->>B: Ticket
 
-**Requests and RPS**
-- Total requests/day = 200 × 5 = **1,000 requests/day**.
-- Busiest hour = 30% of daily volume = 300 requests → 300 ÷ 3,600s = **0.083 req/s** sustained in that hour.
-- Peak burst within that hour = 0.083 × 3 ≈ **0.25 req/s** peak.
-- **Conclusion:** trivial load for a single Uvicorn/FastAPI process (which handles low thousands of req/s for simple CRUD). No component of the request path is under any measurable pressure.
+    B->>A: WS /v1/ws/scans/{id} + ticket
+    A->>A: Validate and consume ticket
+    A-->>B: WebSocket connected
+```
 
-**Storage growth**
-- Bytes/day = 200 scans × 20.4 MB = **4,080 MB/day ≈ 4.08 GB/day**.
-- Bytes/year = 4.08 GB × 365 = **≈ 1,489 GB ≈ 1.49 TB/year**.
+The normal JWT is not placed in the WebSocket URL.
 
-**Row counts (per year, 365 × daily rate)**
-| Table | Rows/day | Rows/year |
-|---|---|---|
-| `scans` | 200 | 73,000 |
-| `reports` | 160 (0.8 × 200) | 58,400 |
-| `patients` (new) | 50 (0.25 × 200) | 18,250 |
-| `audit_log` | 800 (4 × 200) | 292,000 |
+---
 
-All four tables stay in the tens-to-hundreds-of-thousands of rows per year — trivial for a single unpartitioned Postgres instance for many years.
+# 12. Capacity Estimate
 
-**Worker throughput required**
-- Compute-seconds needed/day = 200 × 4s = **800s ≈ 13.3 minutes/day** of worker busy-time.
-- Worst case, concentrated in the busiest hour (30% of jobs = 60 jobs): 60 × 4s = **240s = 4 minutes** of busy-time inside a 3,600s hour → **6.7% utilization at peak**.
-- Theoretical max serial throughput = 3,600s ÷ 4s = **900 jobs/hour**. Required peak = 60 jobs/hour. Massive headroom (15×).
+The current analysis worker is a single serial in-process worker.
 
-**First bottleneck at 200/day:** none of the software components. The system is over-provisioned everywhere; if anything constrains throughput at this scale, it's radiologists reading and finalizing reports, not the infrastructure.
+Assuming approximately four seconds of analysis work per scan:
 
-### 10.3 Scenario B — 20,000 scans/day (100×)
+```text
+200 scans/day
+≈ 800 seconds/day
+≈ 13.3 worker-minutes/day
+```
 
-**Requests and RPS**
-- Total requests/day = 20,000 × 5 = **100,000 requests/day**.
-- Busiest hour = 30% = 30,000 requests → 30,000 ÷ 3,600s = **8.3 req/s** sustained.
-- Peak burst = 8.3 × 3 ≈ **25 req/s**.
-- **Conclusion:** still comfortably inside what a single well-tuned FastAPI/Uvicorn process can serve for lightweight CRUD (low-to-mid hundreds of req/s per worker process is typical), though at this point running more than one Uvicorn worker process behind Nginx stops being optional headroom and becomes a reasonable default. This is a soft constraint, not a wall.
+This is comfortably within a single worker's capacity.
 
-**Storage growth**
-- Bytes/day = 20,000 × 20.4 MB = **408,000 MB/day = 408 GB/day**.
-- Bytes/year = 408 GB × 365 = **≈ 148,920 GB ≈ 148.9 TB/year**.
-- **Conclusion:** a mounted volume is no longer viable at all; object storage with lifecycle tiering (hot → cold/archive) stops being "the later phase" and becomes a day-one requirement, and retention policy (how long scans must legally be kept, and whether older studies move to cheaper storage classes) becomes an active decision, not an afterthought.
+At:
 
-**Row counts (per year)**
-| Table | Rows/day | Rows/year |
-|---|---|---|
-| `scans` | 20,000 | 7,300,000 |
-| `reports` | 16,000 | 5,840,000 |
-| `patients` (new) | 5,000 | 1,825,000 |
-| `audit_log` | 80,000 | 29,200,000 |
+```text
+20,000 scans/day
+≈ 80,000 seconds/day
+≈ 22.2 worker-hours/day
+```
 
-Postgres handles tens of millions of rows in `scans`/`reports`/`patients` without structural changes. `audit_log` at ~29M rows/year is the first table where, after a couple of years, index bloat and vacuum times start to matter — **time-based partitioning of `audit_log` (e.g., monthly)** becomes worth doing proactively, though it is not an immediate hard failure.
+a single worker would have essentially no useful capacity margin.
 
-**Worker throughput required — this is where it breaks**
-- Compute-seconds needed/day = 20,000 × 4s = **80,000s ≈ 22.2 hours/day** of serial compute, against 24 available hours/day. On paper, if load were perfectly flat across all 24 hours, one serial worker would *just barely* fit (22.2 < 24) — but clinical demand isn't flat.
-- Busiest hour = 30% of jobs = **6,000 jobs**. Compute-seconds needed in that one hour = 6,000 × 4s = **24,000s = 6.67 hours** of compute — inside a single 3,600s (1-hour) window.
-- A single serial worker can supply at most 3,600s of compute per hour. Required: 24,000s. **Shortfall: the worker needs to be ~6.7× faster than it is** (i.e., ~7 concurrent workers) just to keep the queue from growing during the busy hour.
-- Concretely: theoretical max throughput of one serial worker is **900 jobs/hour** (from 10.2); the busiest hour demands **6,000 jobs/hour** — nowhere close. The backlog grows continuously through the busy period and only drains (if it ever fully drains) once demand drops off-peak.
+The first major scale concern is therefore worker concurrency.
 
-**First bottleneck at 20,000/day:** the single in-process asyncio worker, unambiguously and by a wide margin — it is roughly an order of magnitude short of peak demand, while the API tier and Postgres both still have comfortable headroom. The second bottleneck, close behind, is raw storage volume and the lack of a lifecycle/tiering policy. `SELECT ... FOR UPDATE SKIP LOCKED` was chosen specifically so the fix (running several worker processes/containers pulling from the same queue) is a scale-out, not a redesign.
+The second major concern is file storage.
 
-### 10.4 Summary
+At a maximum of 20 MB per upload:
 
-| | 200 scans/day | 20,000 scans/day |
-|---|---|---|
-| Peak req/s | ~0.25 | ~25 |
-| Storage/year | ~1.49 TB | ~148.9 TB |
-| `audit_log` rows/year | ~292,000 | ~29,200,000 |
-| Worker compute needed, busiest hour | 240s (6.7% of capacity) | 24,000s (**667% of capacity**) |
-| First bottleneck | None — over-provisioned | Async worker concurrency, then storage lifecycle |
+```text
+20,000 × 20 MB
+≈ 400 GB/day
+```
 
-## 11. Failure modes
+This is one reason the S3 migration is the appropriate future storage direction.
 
-This table is the backbone of the Day 34 runbook: for each component, what breaks, what the user sees, what heals itself, and what a human has to do.
+---
 
-| Component | What happens when it fails | What the user sees | Self-recovers? | Needs a human? | Data at risk? |
-|---|---|---|---|---|---|
-| **Nginx** | Reverse proxy process dies or hangs | Tunnel returns an error; effectively no response | Yes — `restart: unless-stopped` | Only if it keeps crash-looping on restart | None — Nginx holds no state |
-| **API (FastAPI)** | Process dies or crashes mid-request | 502 from Nginx for any in-flight or new request | Yes — restart policy brings a fresh process up | Only if it loops on startup (e.g. bad config, migration mismatch) | None for a clean crash — the in-flight DB transaction rolls back, so nothing is left half-written. *Today (in-memory phase): a crash loses all data outright, since there is no durable store yet* |
-| **Async worker** | Process dies mid-job (no heartbeat mechanism) | The job stays stuck at "running" forever; user sees it simply never finish | No — nothing detects or restarts it automatically | Always — a human has to notice (or an alert has to fire) and restart the container | None once restarted — the row is re-claimed automatically via `SELECT ... FOR UPDATE SKIP LOCKED`; transactional writes prevent a half-written result. Time is lost (the job sat stuck), not data |
-| **Postgres** | Process/container dies, or the DB becomes unreachable | 500 on any DB-touching call; `/healthz` fails | Yes, if the underlying volume is intact — restart brings it back with all data | Only if the volume or the disk itself is damaged | Safe as long as the volume persists; lost entirely only if the volume is deleted or corrupted with no backup |
-| **Object storage (S3 API — moto/LocalStack today)** | Emulator/service becomes unreachable | Upload and analysis-result endpoints return 502/500 | Depends on the emulator/service restarting on its own — not guaranteed in this setup | Usually yes, in the current local setup | An uploaded file is at risk only if the `PutObject` succeeded but the DB row was never committed (or vice versa) — an orphaned object or a dangling reference with no file behind it |
-| **Cloudflare Tunnel** | `cloudflared` process stops | The public URL goes dark immediately, with no error page — just unreachable | No — it's stateless and ephemeral by design | Always — a human (or a supervisor process) has to restart `cloudflared` | None — the tunnel carries no state of its own |
+# 13. Failure Modes
+
+| Component | Failure | User impact | Recovery |
+|---|---|---|---|
+| Nginx | Container stops | Requests unavailable | Container restart |
+| FastAPI | Process stops | API/WS unavailable | Process/container restart |
+| PostgreSQL | Database unavailable | DB-backed operations fail | Database/container recovery |
+| Worker | Process/task stops | Analysis may pause | Stale job recovery when worker resumes |
+| Local storage | Volume unavailable | Scan upload/read fails | Depends on volume availability/backups |
+| Cloudflare Tunnel | Tunnel stops | Public access unavailable | Tunnel restart/recovery |
+| WebSocket | Client/network disconnects | Live events stop | Frontend reconnects |
+| Multiple API processes | Process-local WS manager | Cross-process broadcasts unavailable | Future shared broker |
+
+---
+
+# 14. Current Limitations
+
+## 14.1 Process-local WebSocket manager
+
+Current:
+
+```text
+one API process
+      ↓
+one connection manager
+      ↓
+connected browsers
+```
+
+Future multi-process deployment requires shared event infrastructure.
+
+---
+
+## 14.2 Local file storage
+
+Current files depend on the mounted local volume.
+
+Future storage should use S3-compatible object storage.
+
+---
+
+## 14.3 Single analysis worker
+
+The current worker is intentionally serial.
+
+Higher load will require multiple workers.
+
+The existing PostgreSQL job-claiming design is intended to support that direction.
+
+---
+
+## 14.4 WebSocket dependency
+
+WebSockets can be affected by proxies, firewalls, background browser behavior, or network changes.
+
+Therefore HTTP polling remains available as a fallback.
+
+---
+
+# 15. Future S3 Migration
+
+The intended next storage architecture is:
+
+```text
+                    Current
+FastAPI ────────────────→ mounted volume
+
+
+                    Future
+FastAPI
+   │
+   ▼
+ boto3
+   │
+   ▼
+S3-compatible object storage
+   │
+   └── moto during tests
+```
+
+For real AWS deployment:
+
+```text
+Application
+     ↓
+IAM role
+     ↓
+S3 bucket
+```
+
+Static credentials should not be committed to the application.
+
+Presigned URLs can later allow:
+
+```text
+Browser
+   │
+   └────────────→ S3
+```
+
+so large scan uploads do not need to pass through FastAPI.
+
+---
+
+# 16. Day 38 Design Review Conclusion
+
+The architecture evolved substantially from the original Day 16 design.
+
+The most important changes are:
+
+1. PostgreSQL is now actually deployed.
+2. Nginx is now part of the running stack.
+3. Docker Compose is now the deployment model.
+4. Cloudflare Tunnel is now verified.
+5. Scan files currently use mounted local storage.
+6. The analysis worker is now implemented in-process.
+7. Worker stale-job recovery exists.
+8. WebSocket status delivery was added.
+9. WebSocket authentication uses short-lived single-use tickets.
+10. Frontend WebSocket reconnect/offline handling was added.
+11. HTTP polling remains as a fallback.
+12. The API upload contract evolved from `/v1/scans` to `/v1/scans/upload`.
+13. Upload validation now includes content type and a 20 MB size limit.
+14. The analysis lifecycle uses `uploaded → running → done/failed`.
+15. The API now exposes `file_key`, not a filesystem path.
+16. S3 is still a future migration rather than the current storage implementation.
+
+The original architecture is therefore preserved as the historical design, while this document describes the system that actually exists today.

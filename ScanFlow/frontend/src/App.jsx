@@ -45,7 +45,7 @@ function App() {
                 Logout
             </button>
             <ScanList />
-            {/* <UploadScreen /> */}
+            <UploadScreen />
         </div>
     );
 }

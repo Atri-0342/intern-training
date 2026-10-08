@@ -13,3 +13,5 @@ pytest
 pytest-cov
 greenlet
 websockets
+boto3
+moto[server]

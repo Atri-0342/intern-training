@@ -1,6 +1,8 @@
+from io import BytesIO
 from uuid import UUID, uuid4
 from pathlib import Path
 from datetime import datetime, timezone
+
 from fastapi import (
     APIRouter,
     Depends,
@@ -14,14 +16,16 @@ from fastapi import (
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 from sqlalchemy import select, text
+
 from app.db.session import AsyncSessionLocal
+from app.services.storage import delete_file, upload_file
+
 import asyncio
 
 from app.api.dependencies import pagination_params, require_role
 from app.db.audit import write_audit_log
 from app.db.dependencies import get_async_db, get_db
 from app.models.models import AnalysisJob, Scan
-from app.schemas.analysis import AnalysisJobResponse, AnalysisStatusResponse
 from app.schemas.scan import ScanCreate, ScanResponse
 
 
@@ -39,8 +43,6 @@ router = APIRouter(
     prefix="/v1/scans",
     tags=["scans"],
 )
-
-
 
 
 @router.post(
@@ -72,33 +74,21 @@ def upload_scan(
 
     file_key = f"scans/{scan_id}{extension}"
 
-    file_path = UPLOAD_DIR / f"{scan_id}{extension}"
+    file_content = file.file.read()
 
-    UPLOAD_DIR.mkdir(
-        parents=True,
-        exist_ok=True,
+    total_size = len(file_content)
+
+    if total_size > MAX_FILE_SIZE:
+        raise HTTPException(
+            status_code=413,
+            detail="File size must be 20 MB or less",
+        )
+
+    upload_file(
+        file_object=BytesIO(file_content),
+        file_key=file_key,
+        content_type=file.content_type,
     )
-
-    total_size = 0
-
-    try:
-        with file_path.open("wb") as output:
-            while chunk := file.file.read(1024 * 1024):
-                total_size += len(chunk)
-
-                if total_size > MAX_FILE_SIZE:
-                    raise HTTPException(
-                        status_code=413,
-                        detail="File size must be 20 MB or less",
-                    )
-
-                output.write(chunk)
-
-    except Exception:
-        if file_path.exists():
-            file_path.unlink()
-
-        raise
 
     uploaded_at = datetime.now(timezone.utc)
 
@@ -161,15 +151,16 @@ def get_scan(
         )
 
     return ScanResponse(
-    id=scan.id,
-    patient_id=scan.patient_id,
-    modality=scan.modality,
-    body_part=scan.body_part,
-    acquired_at=scan.acquired_at,
-    uploaded_at=scan.uploaded_at,
-    status=scan.status,
-    file_key=scan.file_key,
-)
+        id=scan.id,
+        patient_id=scan.patient_id,
+        modality=scan.modality,
+        body_part=scan.body_part,
+        acquired_at=scan.acquired_at,
+        uploaded_at=scan.uploaded_at,
+        status=scan.status,
+        file_key=scan.file_key,
+    )
+
 
 @router.get(
     "",
@@ -250,6 +241,7 @@ def update_scan(
         require_role("clinician")
     ),
 ) -> ScanResponse:
+
     db_scan = db.get(
         Scan,
         str(scan_id),
@@ -295,47 +287,39 @@ def update_scan(
                 detail="Only PDF, JPG, and PNG files are allowed",
             )
 
-        extension = ALLOWED_CONTENT_TYPES[file.content_type]
+        extension = ALLOWED_CONTENT_TYPES[
+            file.content_type
+        ]
 
-        new_file_key = f"scans/{scan_id}{extension}"
-        new_file_path = UPLOAD_DIR / f"{scan_id}{extension}"
+        new_file_key = (
+            f"scans/{scan_id}{extension}"
+        )
 
-        old_file_path = None
+        file_content = file.file.read()
 
-        if db_scan.file_key:
-            old_file_path = (
-                UPLOAD_DIR
-                / Path(db_scan.file_key).name
+        total_size = len(file_content)
+
+        if total_size > MAX_FILE_SIZE:
+            raise HTTPException(
+                status_code=413,
+                detail="File size must be 20 MB or less",
             )
 
-        total_size = 0
+        old_file_key = db_scan.file_key
 
-        try:
-            with new_file_path.open("wb") as output:
-                while chunk := file.file.read(1024 * 1024):
-                    total_size += len(chunk)
-
-                    if total_size > MAX_FILE_SIZE:
-                        raise HTTPException(
-                            status_code=413,
-                            detail="File size must be 20 MB or less",
-                        )
-
-                    output.write(chunk)
-
-        except Exception:
-            if new_file_path.exists():
-                new_file_path.unlink()
-            raise
-
-        if (
-            old_file_path
-            and old_file_path.exists()
-            and old_file_path != new_file_path
-        ):
-            old_file_path.unlink()
+        upload_file(
+            file_object=BytesIO(file_content),
+            file_key=new_file_key,
+            content_type=file.content_type,
+        )
 
         db_scan.file_key = new_file_key
+
+        if (
+            old_file_key
+            and old_file_key != new_file_key
+        ):
+            delete_file(old_file_key)
 
     write_audit_log(
         db=db,
@@ -359,7 +343,6 @@ def update_scan(
         file_key=db_scan.file_key,
     )
 
-
 @router.delete(
     "/{scan_id}",
     status_code=204,
@@ -371,6 +354,7 @@ def delete_scan(
         require_role("admin")
     ),
 ) -> None:
+
     db_scan = db.get(
         Scan,
         str(scan_id),
@@ -381,6 +365,9 @@ def delete_scan(
             status_code=404,
             detail="Scan not found",
         )
+
+    if db_scan.file_key:
+        delete_file(db_scan.file_key)
 
     write_audit_log(
         db=db,
