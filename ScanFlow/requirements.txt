@@ -15,3 +15,4 @@ greenlet
 websockets
 boto3
 moto[server]
+redis

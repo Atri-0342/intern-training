@@ -64,10 +64,30 @@ services:
     networks:
       - scanflow-network
 
+  redis:
+    image: redis:7-alpine
+    container_name: scanflow-redis
+
+    command: ["redis-server", "--appendonly", "yes"]
+
+    volumes:
+      - redis-data:/data
+
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+    restart: unless-stopped
+
+    networks:
+      - scanflow-network
+
 
 volumes:
   postgres-data:
-
+  redis-data:
 
 networks:
   scanflow-network:
