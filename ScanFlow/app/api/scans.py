@@ -13,6 +13,7 @@ from fastapi import (
     UploadFile,
     status,
 )
+
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 from sqlalchemy import select, text
@@ -21,7 +22,7 @@ from app.db.session import AsyncSessionLocal
 from app.services.storage import delete_file, upload_file
 
 import asyncio
-
+from app.api.rate_limit import enforce_user_rate_limit
 from app.api.dependencies import pagination_params, require_role
 from app.db.audit import write_audit_log
 from app.db.dependencies import get_async_db, get_db
@@ -42,6 +43,7 @@ ALLOWED_CONTENT_TYPES = {
 router = APIRouter(
     prefix="/v1/scans",
     tags=["scans"],
+    dependencies=[Depends(enforce_user_rate_limit)]
 )
 
 

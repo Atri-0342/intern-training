@@ -1,36 +1,56 @@
+
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
-from app.core.security import hash_password
+from app.api.dependencies import get_current_user
+from app.api.rate_limit import enforce_auth_rate_limit
+from app.core.security import (
+    create_access_token,
+    hash_password,
+    verify_password,
+)
 from app.db.dependencies import get_db
 from app.models.models import User
-from app.core.security import create_access_token, hash_password, verify_password
 from app.schemas.auth import RegisterRequest, TokenRequest, TokenResponse
-from app.api.dependencies import get_current_user, require_role
+
 
 router = APIRouter(
     prefix="/v1/auth",
     tags=["auth"],
 )
 
-# test purpose
+
 @router.get("/me")
 def get_me(
     current_user: dict = Depends(get_current_user),
 ) -> dict:
     return current_user
 
+
 @router.post("/register", status_code=201)
 def register_user(
+    request: Request,
     user: RegisterRequest,
     db: Session = Depends(get_db),
 ) -> dict:
-    existing_user = db.query(User).filter(User.email == user.email).first()
+    enforce_auth_rate_limit(
+        request=request,
+        email=user.email,
+    )
+
+    existing_user = (
+        db.query(User)
+        .filter(User.email == user.email)
+        .first()
+    )
 
     if existing_user is not None:
-        return {"error": "User already exists"}
+        raise HTTPException(
+            status_code=409,
+            detail="User already exists",
+        )
 
     db_user = User(
         id=str(uuid4()),
@@ -41,18 +61,30 @@ def register_user(
 
     db.add(db_user)
     db.commit()
+    db.refresh(db_user)
 
     return {
         "message": "User registered successfully",
         "user_id": db_user.id,
     }
 
+
 @router.post("/token", response_model=TokenResponse)
 def login_user(
+    request: Request,
     user: TokenRequest,
     db: Session = Depends(get_db),
 ) -> TokenResponse:
-    db_user = db.query(User).filter(User.email == user.email).first()
+    enforce_auth_rate_limit(
+        request=request,
+        email=user.email,
+    )
+
+    db_user = (
+        db.query(User)
+        .filter(User.email == user.email)
+        .first()
+    )
 
     if db_user is None:
         raise HTTPException(
@@ -60,7 +92,10 @@ def login_user(
             detail="Invalid email or password",
         )
 
-    if not verify_password(user.password, db_user.hashed_password):
+    if not verify_password(
+        user.password,
+        db_user.hashed_password,
+    ):
         raise HTTPException(
             status_code=401,
             detail="Invalid email or password",

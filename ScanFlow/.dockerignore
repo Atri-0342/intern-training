@@ -23,3 +23,7 @@ uploads/
 
 Dockerfile
 .dockerignore
+# Frontend dependencies and build output
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/

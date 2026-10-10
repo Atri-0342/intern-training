@@ -1,3 +1,4 @@
+
 FROM node:24-alpine AS frontend-builder
 
 WORKDIR /frontend
@@ -8,8 +9,7 @@ RUN npm ci
 COPY frontend/ ./
 RUN npm run build
 
-
 FROM nginx:alpine
 
-COPY frontend/dist/ /usr/share/nginx/html/
+COPY --from=frontend-builder /frontend/dist/ /usr/share/nginx/html/
 COPY nginx/nginx.conf /etc/nginx/nginx.conf
