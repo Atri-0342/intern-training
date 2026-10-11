@@ -70,3 +70,4 @@ coverage/
 
 # Uploaded/local scan files
 uploads/*
+results/*

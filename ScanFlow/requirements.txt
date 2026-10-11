@@ -16,3 +16,4 @@ websockets
 boto3
 moto[server]
 redis
+py-spy

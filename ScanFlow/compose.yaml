@@ -1,8 +1,14 @@
-services:
 
+services:
   api:
     build: .
     container_name: scanflow
+
+    # Temporary: required for local py-spy profiling.
+    cap_add:
+      - SYS_PTRACE
+    security_opt:
+      - seccomp:unconfined
 
     env_file:
       - .env
@@ -21,6 +27,7 @@ services:
 
     networks:
       - scanflow-network
+
 
 
   db:

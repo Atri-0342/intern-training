@@ -94,6 +94,9 @@ async def get_patient(
     )
 
 
+
+
+
 @router.get(
     "",
     response_model=list[PatientResponse],
@@ -101,27 +104,33 @@ async def get_patient(
 async def list_patients(
     pagination: dict[str, int] = Depends(pagination_params),
     db: AsyncSession = Depends(get_async_db),
-    current_user: dict = Depends(require_role("clinician", "radiologist")),
+    current_user: dict = Depends(
+        require_role("clinician", "radiologist")
+    ),
 ) -> list[PatientResponse]:
 
     limit = pagination["limit"]
     offset = pagination["offset"]
 
     result = await db.execute(
-        select(Patient)
+        select(
+            Patient.synthetic_study_id,
+            Patient.dob,
+            Patient.sex,
+        )
         .offset(offset)
         .limit(limit)
     )
 
-    patients = result.scalars().all()
+    rows = result.all()
 
     return [
         PatientResponse(
-            synthetic_study_id=patient.synthetic_study_id,
-            dob=patient.dob,
-            sex=patient.sex,
+            synthetic_study_id=row.synthetic_study_id,
+            dob=row.dob,
+            sex=row.sex,
         )
-        for patient in patients
+        for row in rows
     ]
 
 

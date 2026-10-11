@@ -18,7 +18,7 @@ from app.core.config import (
 # Synchronous database setup
 engine = create_engine(
     f"postgresql+psycopg://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}",
-    echo=True,
+    echo=False,
 )
 
 SessionLocal = sessionmaker(
@@ -30,7 +30,7 @@ SessionLocal = sessionmaker(
 # Asynchronous database setup
 async_engine = create_async_engine(
     f"postgresql+asyncpg://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}",
-    echo=True,
+    echo=False,
 )
 
 AsyncSessionLocal = async_sessionmaker(

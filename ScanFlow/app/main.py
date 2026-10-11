@@ -96,13 +96,13 @@ async def log_request(
 
     response = await call_next(request)
 
-    logger.info(
-        "request_id=%s method=%s path=%s status=%s",
-        request_id,
-        request.method,
-        request.url.path,
-        response.status_code,
-    )
+    #logger.info(
+    #    "request_id=%s method=%s path=%s status=%s",
+    #    request_id,
+    #    request.method,
+    #    request.url.path,
+    #    response.status_code,
+    #)
 
     return response
 
