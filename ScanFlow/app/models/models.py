@@ -1,6 +1,6 @@
 from datetime import date, datetime
 
-from sqlalchemy import CheckConstraint, Date, DateTime, ForeignKey, Index, text
+from sqlalchemy import CheckConstraint, Date, DateTime, ForeignKey, Index, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import TEXT, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy import Float
@@ -333,6 +333,36 @@ class AuditLog(Base):
     )
 
     updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+    )
+
+class IdempotencyRecord(Base):
+    __tablename__ = "idempotency_records"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "key",
+            name="uq_idempotency_user_key",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False),
+        primary_key=True,
+    )
+    user_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    key: Mapped[str] = mapped_column(TEXT, nullable=False)
+    request_hash: Mapped[str] = mapped_column(TEXT, nullable=False)
+    response_body: Mapped[str | None] = mapped_column(TEXT, nullable=True)
+    response_status: Mapped[int | None] = mapped_column(nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
         server_default=text("now()"),
