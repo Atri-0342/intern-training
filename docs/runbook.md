@@ -1,300 +1,303 @@
-# ScanFlow Runbook
+# ScanFlow — Runbook
+
+For whoever has to keep ScanFlow running without asking the person who built it. Commands run from the project root. They work in PowerShell and bash unless marked.
+
+Background: [`architecture.md`](architecture.md) (what each component does and how it fails), [`aws-migration.md`](aws-migration.md).
+
+## At a glance
+
+| Service | Compose name | Container | Port | Health signal |
+|---|---|---|---|---|
+| API + worker | `api` | `scanflow` | internal `80` | `GET /healthz` → `{"status":"ok","database":"connected"}`, container `healthy` |
+| Nginx | `nginx` | `scanflow-nginx-1` | host `8000` → `80` | `docker compose ps` shows `Up` |
+| PostgreSQL | `db` | `scanflow-postgres` | internal `5432` | `pg_isready`, container `healthy` |
+| Redis | `redis` | `scanflow-redis` | internal `6379` | container `healthy` |
+| Moto (S3 emulator) | not in Compose | host process | host `5000` | `curl http://localhost:5000` answers |
+| Cloudflare Tunnel | not in Compose | host process | none | prints a `trycloudflare.com` URL |
+
+Moto and the tunnel are **not** supervised by Compose. After a reboot they must be started by hand ([§7](#7-resilience-drill)).
+
+---
 
 ## 1. Bring the stack up
 
-### Start the existing images
+**Before you start**
 
-```powershell
-docker compose up -d
-```
+1. Docker Desktop is running.
+2. `.env` and `.env.secret` exist in the project root (see the README).
+3. Moto is running on port 5000 and the `scanflow-scans` bucket exists (README step 2).
 
-### Rebuild and start after code/config changes
+**Start**
 
-```powershell
+```bash
 docker compose up -d --build
 ```
 
-### Check service status
+**Verify**
 
-```powershell
-docker compose ps
+```bash
+docker compose ps                      # api, db, redis: healthy; nginx: Up
+curl http://localhost:8000/healthz     # {"status":"ok","database":"connected"}
 ```
 
-Expected state:
+Then log in through the browser at `http://localhost:8000` (not just `/docs`). Migrations run automatically in the API entrypoint and are safe to repeat.
 
-```text
-api        healthy
- db        healthy
-nginx      running
+**Public URL (demo only)**
+
+```bash
+docker run --rm --network host cloudflare/cloudflared:latest tunnel --no-autoupdate --url http://localhost:8000
 ```
 
-### Check application health
-
-```powershell
-curl.exe http://localhost:8000/healthz
-```
-
-Expected:
-
-```json
-{"status":"ok","database":"connected"}
-```
-
-### Check the frontend
-
-Open:
-
-```text
-http://localhost:8000
-```
-
-Log in through the application and confirm protected data is visible.
-
-## 2. Logs and where to find them
-
-The current services primarily log to Docker stdout/stderr. Use Docker Compose to inspect them.
-
-### All services
-
-```powershell
-docker compose logs --timestamps
-```
-
-### API / FastAPI
-
-```powershell
-docker compose logs --timestamps api
-```
-
-Follow API logs live:
-
-```powershell
-docker compose logs -f --timestamps api
-```
-
-### PostgreSQL
-
-```powershell
-docker compose logs --timestamps db
-```
-
-Follow PostgreSQL logs live:
-
-```powershell
-docker compose logs -f --timestamps db
-```
-
-### Nginx
-
-```powershell
-docker compose logs --timestamps nginx
-```
-
-Nginx also writes logs inside the container:
-
-```text
-/var/log/nginx/access.log
-/var/log/nginx/error.log
-```
-
-Read recent Nginx access logs:
-
-```powershell
-docker compose exec nginx sh -c 'tail -n 100 /var/log/nginx/access.log'
-```
-
-Read recent Nginx error logs:
-
-```powershell
-docker compose exec nginx sh -c 'tail -n 100 /var/log/nginx/error.log'
-```
-
-The custom access log includes request ID, status, request time, upstream response time, and upstream status.
+The printed URL dies with the process and changes each run. Capped at 200 in-flight requests.
 
 ---
 
-## 3. Restart a single service
+## 2. Restart a single service
 
-Restart only FastAPI:
+| Goal | Command |
+|---|---|
+| Restart the API (config or env change) | `docker compose restart api` |
+| Rebuild the API after Dockerfile or dependency changes | `docker compose up -d --build api` |
+| Restart Redis / Postgres | `docker compose restart redis` / `docker compose restart db` |
+| Apply an Nginx config change | `docker compose exec nginx nginx -t` then `docker compose exec nginx nginx -s reload` |
+| Rebuild Nginx (new frontend bundle) | `docker compose up -d --build nginx` |
 
-```powershell
-docker compose restart api
-```
+Notes that have caused real incidents:
 
-Restart only Nginx:
-
-```powershell
-docker compose restart nginx
-```
-
-Restart only PostgreSQL:
-
-```powershell
-docker compose restart db
-```
-
-After restarting API or Nginx, verify:
-
-```powershell
-curl.exe http://localhost:8000/healthz
-```
-
-Avoid restarting or recreating PostgreSQL casually during an incident. Confirm database health and the persistence volume first.
+- **`nginx -t` only tests the file; it does not apply it.** Run `nginx -s reload` as a second step.
+- **After the API container is recreated, reload Nginx.** Nginx resolves `api` when it loads its config and can keep proxying to the old IP, which shows up as `504` after 5 s.
+- **Python source changes need no rebuild** while `./app` is bind-mounted into the container; a restart is enough. Dockerfile or `requirements` changes do need `--build`.
+- **Restarting the API interrupts any analysis in flight.** The job is picked up again after the stale-job window (60 s).
 
 ---
 
-## 4. Stop and recover the whole stack
+## 3. Roll back
 
-Stop containers while preserving named volumes:
+Always take a backup first ([§5](#5-back-up-the-database)).
 
-```powershell
-docker compose down
+**Code only (no migration in the release)**
+
+```bash
+git log --oneline -10                  # find the last good commit or tag
+git checkout <good-commit>
+docker compose up -d --build
+curl http://localhost:8000/healthz
 ```
 
-Start them again:
+**Release included a database migration**
 
-```powershell
-docker compose up -d
-```
+Order matters: the downgrade script lives in the *newer* code, so run it **before** checking out the old code.
 
-Do **not** use this for a normal shutdown/restart:
-
-```powershell
-docker compose down -v
-```
-
-`-v` removes named volumes and can remove the PostgreSQL data volume.
-
----
-
-## 5. Roll back a bad application deployment
-
-Check the working tree first:
-
-```powershell
-git status
-```
-
-Inspect recent commits:
-
-```powershell
-git log --oneline -10
-```
-
-Return to a known-good commit in a controlled recovery:
-
-```powershell
-git checkout <known-good-commit>
+```bash
+docker compose exec api alembic current          # note the current revision
+docker compose exec api alembic history | head   # find the target revision
+docker compose exec api alembic downgrade -1     # or a specific revision
+git checkout <good-commit>
 docker compose up -d --build
 ```
 
-Verify:
+If the downgrade is not reversible, or data is damaged, restore the backup taken before the release ([§6](#6-restore-into-a-fresh-database)).
+
+---
+
+## 4. Where the logs live
+
+All services log to stdout, so Docker holds them. There are no log files to hunt for inside containers.
+
+| What | Command | Notes |
+|---|---|---|
+| API and **worker** | `docker compose logs api --tail=100 -f` | Worker lines: `Processing analysis job`, `Completed analysis job`, `Recovered stale analysis job` |
+| Nginx access and error | `docker compose logs nginx --tail=100` | Format includes `request_id`, `request_time`, `upstream_response_time`, `upstream_status`. Errors also go here, not to `/var/log/nginx/error.log` |
+| PostgreSQL | `docker compose logs db --tail=100` | Statements slower than 100 ms are logged (`log_min_duration_statement`) |
+| Redis | `docker compose logs redis --tail=50` | |
+| Tunnel | the terminal running `cloudflared` | Not in Compose |
+| Everything | `docker compose logs --tail=200` | |
+
+**Follow one request end to end.** Nginx creates a request ID and passes it on, so one ID appears in the Nginx, API and worker logs.
 
 ```powershell
-docker compose ps
-curl.exe http://localhost:8000/healthz
+# PowerShell
+docker compose logs --no-log-prefix | Select-String "<request-id>"
+```
+```bash
+# bash
+docker compose logs --no-log-prefix | grep "<request-id>"
 ```
 
-## 6. PostgreSQL backup with `pg_dump`
+**Is something slow right now?**
 
-The tested backup used PostgreSQL custom format (`-Fc`).
+```bash
+docker compose exec db psql -U postgres -d scanflow -c "SELECT pid, state, now()-query_start AS running_for, left(query,80) FROM pg_stat_activity WHERE datname='scanflow' AND state <> 'idle' ORDER BY running_for DESC;"
+```
 
-### Create the backup on the Windows host
+---
 
-Create a backup :
+## 5. Back up the database
 
+`pg_dump` in custom format (`-Fc`) is compressed and restorable with `pg_restore`.
+
+```bash
+mkdir backups
+docker compose exec db pg_dump -U postgres -Fc -f /tmp/scanflow.dump scanflow
+docker compose cp db:/tmp/scanflow.dump ./backups/scanflow-$(date +%F).dump        # bash
+```
 ```powershell
-docker compose exec -T db sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc' > .\scanflow.dump
+# PowerShell equivalent of the last line
+docker compose cp db:/tmp/scanflow.dump ".\backups\scanflow-$(Get-Date -Format yyyy-MM-dd).dump"
 ```
 
-The result is a host-side file:
+Dump inside the container and copy the file out. Do **not** use `>` redirection in Windows PowerShell: it re-encodes the output and corrupts a binary dump.
 
-```text
-scanflow\scanflow.dump
+**What a database backup does not contain:** the scan files. Those live in object storage, so back them up separately (real S3: versioning and lifecycle rules; Moto: nothing is persisted at all). Restoring only the database leaves rows whose `file_key` points at nothing.
+
+Keep `backups/` out of Git. Dumps contain patient data.
+
+---
+
+## 6. Restore into a fresh database
+
+An untested backup is not a backup. This restores into a **separate** database so production is untouched, then checks that the data is really there.
+
+```bash
+# 1. Create an empty database
+docker compose exec db psql -U postgres -c "CREATE DATABASE scanflow_restore_test;"
+
+# 2. Copy the dump in and restore it
+docker compose cp ./backups/scanflow-YYYY-MM-DD.dump db:/tmp/restore.dump
+docker compose exec db pg_restore -U postgres -d scanflow_restore_test --no-owner --exit-on-error /tmp/restore.dump
+
+# 3. Compare row counts with the source
+docker compose exec db psql -U postgres -d scanflow              -c "SELECT (SELECT count(*) FROM patients) AS patients, (SELECT count(*) FROM scans) AS scans;"
+docker compose exec db psql -U postgres -d scanflow_restore_test -c "SELECT (SELECT count(*) FROM patients) AS patients, (SELECT count(*) FROM scans) AS scans;"
+
+# 4. Clean up
+docker compose exec db psql -U postgres -c "DROP DATABASE scanflow_restore_test;"
 ```
 
-### Verify the backup exists
+The two count rows must match. At the time of writing the dataset held 20,002 patients and 200,000 scans.
 
-```powershell
-Get-Item .\scanflow.dump
+**Last verified restore:** `____-__-__` by `________` (fill in after each drill).
+
+**Real disaster recovery (replace the live database)**
+
+```bash
+docker compose stop api
+docker compose exec db psql -U postgres -c "DROP DATABASE scanflow;"
+docker compose exec db psql -U postgres -c "CREATE DATABASE scanflow;"
+docker compose cp ./backups/<file>.dump db:/tmp/restore.dump
+docker compose exec db pg_restore -U postgres -d scanflow --no-owner /tmp/restore.dump
+docker compose start api
+curl http://localhost:8000/healthz
 ```
 
-## 7. Restore into a fresh database
+---
 
-This procedure restores the backup into a **separate database** so the live `scanflow` database is not modified.
+## 7. Resilience drill
 
-The actual ScanFlow environment uses:
+Every service in Compose has `restart: unless-stopped`.
 
-```text
-POSTGRES_USER = postgres
-POSTGRES_DB   = scanflow
+```bash
+docker compose down        # keeps the database volume
+docker compose up -d       # stack returns on its own, data intact
 ```
 
-### Copy the dump into the PostgreSQL container
+Never use `down -v` for this drill: it deletes the volume.
 
-When the dump is on the host as `scanflow.dump`:
+**After a laptop reboot**
 
-```powershell
-docker cp .\scanflow.dump scanflow-postgres:/tmp/scanflow.dump
+1. Docker Desktop starts (set it to start at login) and brings the Compose containers back by itself.
+2. Start Moto and recreate the bucket (it is in memory, so every uploaded file is gone; see Known limits).
+3. Start `cloudflared` again and share the new URL.
+4. `docker compose ps` and `curl http://localhost:8000/healthz`.
+
+---
+
+## 8. Troubleshooting
+
+### The container exits straight away and prints nothing
+
+```bash
+docker compose ps -a                   # exit code and state
+docker compose logs api                # the traceback, if any
+docker compose config                  # the resolved config: missing env var, bad path
 ```
 
-### Create a fresh restore database
+If logs are empty even though the app is running, check that `PYTHONUNBUFFERED=1` is set; without it output sits in a buffer.
 
-Use direct `psql` arguments on PowerShell to avoid nested shell-quoting problems:
+### The API cannot reach the database
 
-```powershell
-docker compose exec -T db psql -U postgres -d scanflow -c "CREATE DATABASE scanflow_restore;"
+```bash
+docker compose ps                                          # is db healthy?
+docker compose logs db --tail=50
+docker compose exec api getent hosts db                    # does the name "db" resolve?
+docker compose exec db pg_isready -U postgres -d scanflow
 ```
 
-Expected:
+Docker's built-in DNS resolves service names on the Compose network; if `db` does not resolve, the containers are not on the same network.
 
-```text
-CREATE DATABASE
+### A gateway error from Nginx
+
+| Status | Meaning | First three commands |
+|---|---|---|
+| **502** | Nginx reached a live host that refused or sent garbage: the API process is down but its container is up | `docker compose ps` → `docker compose logs api --tail=50` → `docker compose exec nginx wget -S -O- http://api:80/healthz` |
+| **503** | Nginx itself refused the request, usually `limit_req` (rate limit) | `docker compose logs nginx --tail=20` → check the `limit_req` zone → wait and retry |
+| **504** | Nginx waited and got nothing (5 s connect timeout): the API container is stopped or its IP changed | `docker compose ps` → `docker compose start api` → `docker compose exec nginx nginx -s reload` |
+
+### I changed code and nothing changed
+
+`./app` is bind-mounted, so a save is visible inside the container, but the running process has not reloaded. `docker compose restart api`. For Dockerfile or dependency changes, `docker compose up -d --build api`.
+
+### Analysis never finishes
+
+```bash
+docker compose logs api --tail=100 | grep -i -E "analysis|worker"
+docker compose exec db psql -U postgres -d scanflow -c "\dt"      # confirm the jobs table name
+docker compose exec db psql -U postgres -d scanflow -c "SELECT id, scan_id, status, retry_count, error, created_at FROM analysis_jobs WHERE status IN ('uploaded','running') ORDER BY created_at;"
 ```
 
-### Restore the dump
+- Jobs sit in `uploaded` and nothing is logged: the worker task has stopped. Restart the API (`docker compose restart api`). `/healthz` will still say `ok`, because it only checks the database.
+- Jobs in `running` for over a minute: stale-job recovery will return them to `uploaded` on its own.
 
-```powershell
-docker compose exec -T db pg_restore -U postgres -d scanflow_restore /tmp/scanflow.dump
+### Status does not arrive live
+
+The WebSocket may have dropped; the page reconnects with backoff and falls back to polling. Check that Nginx still forwards `Upgrade`/`Connection` for `/v1/ws/`, and that the ticket has not expired (about 30 s, single use).
+
+### Upload returns `409 … Idempotency-Key … still being processed` and never clears
+
+An upload that failed after the key was reserved (for example storage was down) leaves the reservation behind, so a retry with the **same key** is refused. Retry with a **new** key. To clear stuck reservations:
+
+```bash
+docker compose exec db psql -U postgres -d scanflow -c "DELETE FROM idempotency_records WHERE response_body IS NULL AND created_at < now() - interval '5 minutes';"
 ```
 
-### Verify the restored schema
+### Requests return `429`
 
-```powershell
-docker compose exec -T db psql -U postgres -d scanflow_restore -c "\dt"
-```
+Expected when a user exceeds the per-user limit (10 requests burst, refilling 1 per second) or makes too many login attempts (a burst of 5, then one per minute). Honour `Retry-After`.
 
-The verified restore contained these tables:
+### Every scan route returns `500` and Redis is down
 
-```text
-alembic_version
-analysis_jobs
-audit_log
-patients
-reports
-scans
-users
-```
+The rate limiter has no fallback. `docker compose ps redis`, then `docker compose restart redis`.
 
-### Verify representative application data
+### Uploads fail, or downloads are missing after a restart
 
-```powershell
-docker compose exec -T db psql -U postgres -d scanflow_restore -c "SELECT synthetic_study_id, dob, sex FROM patients LIMIT 1;"
-```
+Moto is not running, or it was restarted (it keeps data in memory). Start it, recreate the bucket (README step 2). Files uploaded before the restart are gone; their database rows now point at nothing.
 
-The actual restore drill returned:
+---
 
-```text
-074a4ea1-a1a3-4b31-b387-1e6ae1c8f3e4 | 1985-01-04 | male
-```
-the dump was restored into a fresh database and real application data was recovered.
+## 9. Secrets and configuration
 
-### Cleanup the temporary restore database
+| Change | Effect | Steps |
+|---|---|---|
+| Rotate `JWT_SECRET` | Every logged-in user is signed out | Edit `.env.secret`, `docker compose up -d api` |
+| Change the database password | Must match in two places | Update `DB_PASSWORD` **and** `POSTGRES_PASSWORD`; an existing volume keeps the old password until you run `ALTER USER postgres PASSWORD '…'` |
+| Any `.env` edit | Not read until the container is recreated | `docker compose up -d` (a plain `restart` does not re-read env files) |
 
-After verification:
+Never commit `.env`, `.env.secret`, or anything in `backups/`.
 
-```powershell
-docker compose exec -T db psql -U postgres -d scanflow -c "DROP DATABASE IF EXISTS scanflow_restore WITH (FORCE);"
-```
+## 10. Known limits
 
-This does not remove the live `scanflow` database or the `postgres-data` volume.
+- Moto keeps files in memory: a restart loses every uploaded file.
+- One analysis worker inside the API process; no heartbeat, and a dead worker task is not restarted.
+- WebSocket connections are tracked per API process; a second API process would not see them.
+- The Quick Tunnel URL changes on every start and is capped at 200 in-flight requests.
+- Backups cover the database only.

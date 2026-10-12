@@ -2,249 +2,153 @@
 
 ## Scope
 
-This document maps the ScanFlow components built locally with Docker Compose to AWS managed services. It is a design exercise; no production AWS resources are required for this checkpoint.
+This document maps every component ScanFlow runs today with Docker Compose to the AWS service that would replace it, and says what is gained and what is given up. It is a design exercise: no AWS resources are created.
 
-The cost model uses the Mumbai Region (`ap-south-1`) and a small, single-instance, single-AZ starting point. Prices are illustrative on-demand assumptions and exclude applicable taxes, backup/storage extras, NAT Gateway charges, and other services not listed in the assignment.
+The cost model uses the Mumbai Region (`ap-south-1`) and a small, single-instance, single-AZ starting point. Prices are on-demand and illustrative; taxes and the items listed under [Excluded from the estimate](#excluded-from-the-estimate) are not included.
 
 ## 1. Service mapping
 
 | Your stack | AWS service | Gain | Cost or trade-off |
 |---|---|---|---|
-| Docker Compose on a laptop | EC2 or ECS Fargate | Cloud-hosted compute; ECS/Fargate can replace container lifecycle management while EC2 gives more host control | Ongoing AWS compute cost. EC2 still requires OS/host management; Fargate reduces host management but adds ECS/task-definition/networking configuration |
-| PostgreSQL container | Amazon RDS for PostgreSQL | Managed database provisioning, backups, patching, monitoring, and storage management | Higher service cost than a local container; less host-level control; RDS-specific limits/configuration |
-| Named volume for uploads | Amazon S3 | Durable object storage independent of compute lifecycle; scalable storage and access controls | Requires S3 API usage, object-key design, IAM permissions, lifecycle/security configuration |
-| Nginx | Application Load Balancer | Managed public ingress, health checks, target routing, and load balancing | ALB is not a one-for-one replacement for all Nginx features; hourly and LCU charges |
-| Self-signed certificate | AWS Certificate Manager (ACM) | Managed certificate issuance/renewal and integration with ALB/CloudFront | Requires a domain and validation; certificate lifecycle moves to AWS |
-| In-process asyncio worker | Amazon SQS + ECS service | Durable queue, retryable work, independent worker scaling, decoupling from API lifecycle | More components and operational configuration; queue semantics must be handled by the application |
-| `.env` / `.env.secret` | AWS Secrets Manager / SSM Parameter Store | Centralized configuration/secrets with IAM-controlled access | Additional service dependency and configuration; Secrets Manager can add per-secret/per-API costs |
-| `docker logs` | Amazon CloudWatch Logs | Centralized searchable logs, retention, monitoring and alert integration | Log ingestion, storage and queries can incur charges |
+| Docker Compose on a laptop | EC2 or ECS Fargate | Cloud-hosted compute. Fargate removes host management; EC2 keeps full host control | Ongoing compute cost. EC2 still needs OS patching; Fargate adds task-definition and networking configuration |
+| PostgreSQL container + `postgres-data` volume | Amazon RDS for PostgreSQL | Managed provisioning, automated backups, patching, monitoring, storage growth | Higher cost than a container; less host-level control; RDS-specific limits |
+| Moto S3 emulator (scan files) | Amazon S3 | Durable object storage independent of compute; scalable; lifecycle tiering; IAM access control. Fixes the "restart loses every file" problem | Needs bucket policy, IAM and lifecycle configuration; request and transfer charges |
+| Nginx (reverse proxy) | Application Load Balancer | Managed public ingress, health checks, target routing | Not a one-for-one replacement (static serving and some rewrites move elsewhere); hourly + LCU charges |
+| Cloudflare Quick Tunnel + self-signed cert | ALB + ACM certificate + Route 53 domain | Stable URL, managed certificate issuance and renewal | Needs a domain; the tunnel's "no account needed" convenience is gone |
+| In-process asyncio worker | Amazon SQS + ECS service | Durable queue, retries, independent worker scaling, decoupled from the API lifecycle | More components; queue semantics (visibility timeout, duplicates) are now the application's problem. WebSocket events then need a shared channel (see Redis row) |
+| Redis container (rate limits) | Amazon ElastiCache | Managed, replicated, patched cache; also the natural home for WebSocket fan-out between API processes | Extra monthly cost; network access must be locked down |
+| `.env` / `.env.secret` | Secrets Manager / SSM Parameter Store | Central, IAM-controlled secrets with rotation | Another service dependency; Secrets Manager charges per secret and per API call |
+| `docker logs` | Amazon CloudWatch Logs | Central, searchable, retained logs with alarms | Ingestion, storage and query charges |
 
-### Important storage distinction
+### Storage distinction
 
-The current `postgres-data` Docker volume stores PostgreSQL database files. S3 is **not** the replacement for that database volume. In an AWS design:
+The `postgres-data` volume holds PostgreSQL's files. **S3 is not its replacement.** In AWS the database container and its volume become **RDS**; the scan files that Moto stores become **S3**.
 
-- PostgreSQL container + its volume → **RDS for PostgreSQL**
-- Future scan/report object storage → **S3**
+## 2. Request path on AWS
 
-## 2. Security groups
+```text
+Internet ──HTTPS :443──▶ ALB (ACM certificate, TLS terminates here)
+                          │ HTTP, private subnets
+                          ▼
+                       ECS tasks: API + worker  ──TCP 5432──▶ RDS PostgreSQL
+                          │                    └──TCP 6379──▶ ElastiCache
+                          └──HTTPS (IAM role)──▶ S3 bucket
+```
 
-A simple AWS layout is:
+TLS terminates at the ALB. ALB → API is plain HTTP inside the VPC, which is acceptable at the start. Because ScanFlow holds patient data, the next step would be TLS to the targets and `sslmode=require` to RDS.
+
+## 3. Security groups
 
 ```text
 Internet
-   |
-   | HTTPS :443
-   v
-+--------------------+
-| ALB security group |
-+---------+----------+
-          |
-          | application port
-          v
-+--------------------+
-| ECS/API SG         |
-+---------+----------+
-          |
-          | TCP :5432
-          v
-+--------------------+
-| RDS PostgreSQL SG  |
-+--------------------+
+   │  HTTPS :443
+   ▼
+[ ALB SG ] ──▶ [ API / ECS SG ] ──▶ [ RDS SG ]
+                     └─────────────▶ [ ElastiCache SG ]
 ```
 
-| Security group / resource | Port | Protocol | Source | Justification |
+| Security group | Port | Protocol | Source | Justification |
 |---|---:|---|---|---|
-| ALB security group | 443 | TCP | `0.0.0.0/0` | Public HTTPS entry point |
-| ALB security group | 80 | TCP | `0.0.0.0/0` | Optional HTTP listener used only to redirect to HTTPS |
-| ECS/API security group | Application port (for example `8000`, or the container listener port chosen for ECS) | TCP | ALB security group | Only the load balancer should reach the API |
-| RDS security group | 5432 | TCP | ECS/API security group | Only the application service needs PostgreSQL access |
+| ALB | 443 | TCP | `0.0.0.0/0` | Public HTTPS entry point |
+| ALB | 80 | TCP | `0.0.0.0/0` | Optional; only to redirect to HTTPS |
+| API / ECS | container port (for example `80`) | TCP | the ALB security group | Only the load balancer may reach the API |
+| RDS | 5432 | TCP | the API / ECS security group | Only the application needs the database |
+| ElastiCache | 6379 | TCP | the API / ECS security group | Only the application needs the cache |
 
-### Why 5432 is never open to `0.0.0.0/0`
+**Why 5432 is never open to `0.0.0.0/0`, even though the API needs the database.** The API needs *a* path to PostgreSQL, not the whole internet. Allowing `0.0.0.0/0` would let any host on earth attempt to authenticate to the database; referencing the API's security group as the source allows exactly the application tier and nothing else, and follows the API if its IP addresses change.
 
-Port 5432 is an internal database dependency. The API requires access to PostgreSQL, but public Internet clients do not. Allowing `0.0.0.0/0` would expose the database service to arbitrary Internet sources, so the RDS security group should instead allow TCP 5432 only from the API/ECS security group.
+## 4. IAM policy for the API role
 
-## 3. IAM policy for the API role
+The API's role is limited to one bucket prefix. The policy is in [`aws-api-s3-policy.json`](aws-api-s3-policy.json):
 
-The API needs only object read/write access to one S3 prefix:
-
-```text
-arn:aws:s3:::scanflow-objects/scans/*
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ScanObjectsReadWriteDelete",
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutObject",
+        "s3:GetObject",
+        "s3:DeleteObject",
+        "s3:AbortMultipartUpload"
+      ],
+      "Resource": "arn:aws:s3:::scanflow-scans/scans/*"
+    }
+  ]
+}
 ```
 
-The least-privilege policy is stored separately in:
+The brief calls for `PutObject` and `GetObject` only. The code also calls `delete_file` (admin scan deletion, rollback of a failed upload, replacing a file on update), so `DeleteObject` is required or those paths would fail with `AccessDenied`. `AbortMultipartUpload` is included because boto3 splits files over 8 MB (the app allows up to 20 MB) into multipart uploads and needs it to clean up a failed one. Nothing else is granted: no `ListBucket` (so a `GetObject` for a missing key returns `403`, not `404`), no other prefixes, no other buckets. `scanflow-scans` is the development bucket name; a real bucket name must be globally unique.
 
-```text
-`docs/aws-api-s3-policy.json`
-```
+**Why a role and not an access key.** A role gives the running task short-lived credentials that AWS rotates automatically and that never appear in the source tree, the image, a log, or a `.env` file. An access key is a long-lived secret that has to be stored, rotated and protected, and one leak grants its permissions until someone notices.
 
-The API should use an **IAM role** because the workload can receive temporary AWS credentials rather than carrying a long-lived access key in application configuration. This reduces the risk of a permanent credential leaking through source code, images, logs, or `.env` files.
+## 5. Moving file storage from Moto to S3
 
-## 4. Cost estimate
+ScanFlow already talks to storage through boto3 and stores only `file_key` (`scans/{scan-id}.{ext}`) in PostgreSQL, so the application code does not change.
+
+| Step | Change |
+|---|---|
+| 1 | Create the S3 bucket in `ap-south-1`; block all public access |
+| 2 | Set `S3_BUCKET` and `S3_REGION`; **remove `S3_ENDPOINT_URL`** (that variable is what points boto3 at Moto) |
+| 3 | Delete the dummy `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`; attach the IAM role above to the task |
+| 4 | Keep Moto for local development and automated tests |
+
+**Later improvement: presigned uploads.** Today a 15 MB scan travels browser → FastAPI → S3, so the API handles every byte. With a presigned URL the API issues a short-lived, single-object URL (for example `POST /v1/scans/upload-url` for `scans/{id}.jpg`), the browser uploads straight to S3, and the API stores the key afterwards. The API no longer carries the file transfer. Two things would have to be rebuilt server-side, because today the API enforces them itself: the 20 MB and content-type limits (use a presigned *POST* with a `content-length-range` condition) and the idempotency check. This is planned, not implemented.
+
+## 6. Cost estimate
 
 ### Assumptions
 
-Region:
+- Region: Asia Pacific (Mumbai), `ap-south-1`
+- 1 × EC2 `t4g.micro`, Linux, on-demand, 730 h/month
+- 1 × RDS PostgreSQL `db.t4g.micro`, Single-AZ, on-demand, 730 h/month
+- 1 × Application Load Balancer, 730 h/month, about 1 LCU on average
+- 50 GB S3 Standard
+- 20 GB/month data transfer out to the internet
 
-```text
-Asia Pacific (Mumbai) — ap-south-1
-```
-
-Workload:
-
-- 1 small EC2 instance: `t4g.micro`, Linux, on-demand, 730 hours/month
-- 1 small RDS PostgreSQL instance: `db.t4g.micro`, Single-AZ, on-demand, 730 hours/month
-- 1 Application Load Balancer, 730 hours/month
-- Assume approximately 1 average LCU for the ALB
-- 50 GB S3 Standard storage
-- 20 GB/month Internet data transfer out
-- Excludes taxes, RDS backup/storage charges, EBS charges, public IPv4 charges, NAT Gateway, CloudFront, CloudWatch ingestion/storage, and request charges
-
-### Illustrative monthly calculation
+### Monthly calculation
 
 | Line item | Assumption | Approx. monthly |
 |---|---|---:|
 | EC2 | `t4g.micro` × 730 h × $0.0056/h | $4.09 |
 | RDS PostgreSQL | `db.t4g.micro` × 730 h × $0.021/h | $15.33 |
-| ALB | 730 h × $0.0225/h | $16.43 |
-| ALB LCU | 1 LCU × 730 h × $0.008/h | $5.84 |
+| ALB hours | 730 h × $0.0225/h | $16.43 |
+| ALB LCU | 1 LCU × 730 h × $0.008/LCU-h | $5.84 |
 | S3 | 50 GB × $0.025/GB-month | $1.25 |
-| Internet data transfer out | 20 GB/month | $0 under the applicable 100 GB/month allowance |
-| **Total** |  | **~$42.93/month** |
+| Data transfer out | 20 GB | $0 (inside the 100 GB/month free allowance) |
+| **Total** | | **≈ $42.93 / month** |
 
-AWS documents that Application Load Balancers incur an hourly running charge plus LCU usage charges. Actual regional pricing and the precise usage model should be entered in the AWS Pricing Calculator before a real deployment. AWS also states that applicable AWS Free Tier usage includes 100 GB/month of data transfer out to the internet, aggregated across eligible services and regions.
+The EC2 and RDS rates match published Mumbai on-demand prices. The ALB hourly and LCU rates are AWS's published baseline and were **not** confirmed for Mumbai; check them in the [AWS Pricing Calculator](https://calculator.aws/) before relying on the total.
+
+### Excluded from the estimate
+
+- Taxes; EBS volume and RDS storage/backup charges
+- **Public IPv4 addresses**: billed hourly per address, and an ALB uses at least two, so this is a few dollars a month that is easy to forget
+- NAT Gateway, CloudFront, CloudWatch ingestion and storage
+- ElastiCache (the Redis row) and SQS/second ECS service (the worker row); the estimate covers the smallest *current* shape, not the full target mapping
+- S3 request charges
 
 ### What surprised me
 
-**The Application Load Balancer is the surprising line item.** Even at low traffic, the ALB has a baseline hourly charge, and LCU usage is additional. It can therefore cost more than expected for a small low-traffic application, before considering other networking costs.
+**The load balancer.** At this size the ALB (≈ $22/month for hours plus LCU) costs more than the EC2 instance and more than the database, before any real traffic. For a low-traffic app it is the largest line item, which is the opposite of what the architecture diagram suggests.
 
-## 5. If this went to production Monday, which one of the twelve rows above would you move first, and why?
+## 7. What I would move first
 
-If ScanFlow went to production on Monday, I would move the PostgreSQL container to Amazon RDS for PostgreSQL first. PostgreSQL is the stateful part of the system, while the API and Nginx can be treated more like replaceable compute. Moving the database to RDS would separate persistent data from the application containers and shift database infrastructure responsibilities such as storage, backups, patching, and maintenance to a managed service. This would give the rest of the application a more stable foundation for later migrations to ECS/Fargate, S3, ALB, and other managed services.
+If this went to production on Monday I would move the PostgreSQL container to **RDS** first. The database is the only stateful part; the API, Nginx and Redis can be recreated from the repository at any time, but patient records cannot. RDS gives automated backups, point-in-time recovery and patching, and it separates the data from the compute so every later move (ECS, ALB, S3) happens on top of a durable foundation. It also removes today's single point of failure: a database volume on one laptop, protected only by a `pg_dump` someone has to remember to take.
 
-## Notes on pricing and assumptions
+## Notes
 
-- `t4g.micro` is available in `ap-south-1`.
-- Current public pricing references list `t4g.micro` in Mumbai at about $0.0056/hour and `db.t4g.micro` in Mumbai at about $0.021/hour.
-- S3 Standard in Mumbai is approximately $0.025/GB-month for the first 50 TB tier.
-- The ALB example above uses AWS's published $0.0225/hour and $0.008/LCU-hour figures as an illustrative baseline; confirm the exact Mumbai estimate in the AWS Pricing Calculator.
-- The cost estimate intentionally does not pretend to be an AWS bill. It is a reproducible small-workload model for the training checkpoint.
+- Mumbai on-demand rates for `t4g.micro` ($0.0056/h) and `db.t4g.micro` ($0.021/h) were checked against public price lists. Regional prices change; the Pricing Calculator is the source of truth.
+- This is a reproducible small-workload model, not a bill.
 
 ## References
 
-- AWS EC2 documentation: https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/EC2_GetStarted.html
-- AWS Security Groups documentation: https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-security-groups.html
-- AWS IAM documentation: https://docs.aws.amazon.com/IAM/latest/UserGuide/IAM_Introduction.html
-- AWS RDS documentation: https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/Welcome.html
-- AWS S3 documentation: https://docs.aws.amazon.com/AmazonS3/latest/userguide/Welcome.html
-- AWS Elastic Load Balancing pricing: https://aws.amazon.com/elasticloadbalancing/pricing/
-- AWS global network / data transfer FAQs: https://aws.amazon.com/about-aws/global-infrastructure/global-network/faqs/
-- AWS Pricing Calculator: https://calculator.aws/
-
-
-# AWS Migration
-
-## Current Storage
-
-ScanFlow currently uses an S3-compatible storage layer through `boto3`.
-
-During development and testing:
-
-- Moto provides the S3-compatible API.
-- The application connects to the Moto endpoint.
-- Test credentials are used locally.
-- Scan objects are stored in the `scanflow-scans` bucket.
-- PostgreSQL stores only the S3 object key in `file_key`.
-
-The application uses `boto3` for storage operations, so the same storage code can be used with Moto during development and AWS S3 in production.
-
-## Migration to AWS S3
-
-For production, Moto will be replaced with a real AWS S3 bucket.
-
-The application configuration will use the AWS S3 bucket name and AWS region instead of the local Moto endpoint.
-
-The production setup should include:
-
-- AWS S3 bucket name
-- AWS region
-- IAM-based authentication
-- Required S3 permissions
-
-AWS credentials should not be hard-coded or committed to the repository.
-
-## Credentials and IAM Role
-
-Development currently uses test credentials for Moto.
-
-In production, static AWS access keys should not be stored in the application configuration.
-
-Instead, the application should use an IAM role attached to its AWS compute environment.
-
-The IAM role should provide only the permissions required by ScanFlow, such as:
-
-- Upload objects
-- Read objects
-- Delete objects
-
-This follows the principle of least privilege.
-
-## Presigned URLs for Large Uploads
-
-Currently, when a scan is uploaded, the file is sent to the FastAPI application first. FastAPI then sends the file to S3.
-
-For production, large scan files can be uploaded directly from the browser to S3 using a presigned URL.
-
-A presigned URL is a temporary URL generated by the backend. It gives the client permission to upload a specific file to a specific S3 location for a limited amount of time.
-
-### Example
-
-Suppose a clinician wants to upload a 15 MB MRI image called:
-
-`brain-mri.jpg`
-
-Instead of sending the 15 MB file through FastAPI, the browser can first request an upload URL from the API.
-
-For example:
-
-`POST /v1/scans/upload-url`
-
-FastAPI generates a temporary presigned URL for an S3 object such as:
-
-`scans/8d27489c-8c42-49fe-a2b6-2d5c2a0b8c38.jpg`
-
-The API returns this temporary URL to the browser.
-
-The browser then uses the temporary URL to upload `brain-mri.jpg` directly to AWS S3.
-
-FastAPI does not need to receive or transfer the 15 MB file.
-
-After the upload is completed, the API can store the S3 object key in PostgreSQL:
-
-`file_key = scans/8d27489c-8c42-49fe-a2b6-2d5c2a0b8c38.jpg`
-
-The presigned URL should have a short expiration time so that the upload permission is temporary.
-
-This approach is useful for large radiology files because the API server does not have to handle the entire file transfer.
-
-Presigned URL uploads are a planned production improvement. They are not part of the current Day 38 implementation.
-
-## Production Changes
-
-The production migration requires:
-
-1. Create the production S3 bucket.
-2. Configure the AWS region and bucket name.
-3. Replace the Moto endpoint with AWS S3.
-4. Replace test credentials with IAM role authentication.
-5. Configure the required IAM permissions.
-6. Continue storing S3 object keys in PostgreSQL.
-7. Introduce presigned URLs for large production uploads.
-8. Continue using `boto3` for the storage layer.
-
-## Development and Testing
-
-Moto can continue to be used for local development and automated tests.
-
-No real AWS account is required for the current development setup.
-
-The current implementation uses the same S3-style API through `boto3`, making the later migration to AWS S3 straight forward.
+- [Amazon EC2: get started](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/EC2_GetStarted.html)
+- [EC2 security groups](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-security-groups.html)
+- [What is IAM?](https://docs.aws.amazon.com/IAM/latest/UserGuide/IAM_Introduction.html)
+- [What is Amazon RDS?](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/Welcome.html)
+- [What is Amazon S3?](https://docs.aws.amazon.com/AmazonS3/latest/userguide/Welcome.html)
+- [Elastic Load Balancing pricing](https://aws.amazon.com/elasticloadbalancing/pricing/)
+- [AWS Pricing Calculator](https://calculator.aws/)
