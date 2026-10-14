@@ -1,3 +1,4 @@
+
 from datetime import datetime
 from uuid import UUID
 
@@ -17,4 +18,5 @@ class ReportResponse(BaseModel):
     scan_id: UUID
     findings: str
     radiologist_id: UUID
-    finalized_at: datetime | None
+    finalized_at: datetime | None = None
+    pdf_key: str | None = None

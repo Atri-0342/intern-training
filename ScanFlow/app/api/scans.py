@@ -47,7 +47,7 @@ router = APIRouter(
 
 
 @router.post(
-    "/upload",
+    "/",
     response_model=ScanResponse,
     status_code=status.HTTP_201_CREATED,
 )
