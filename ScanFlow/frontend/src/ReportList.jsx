@@ -1,5 +1,12 @@
-import { useEffect, useState } from "react";
+
+import { useState, useEffect } from "react";
 import { apiFetch } from "./api";
+
+const REPORT_ROLES = {
+    VIEW: ["clinician", "radiologist", "admin"],
+    UPDATE: "radiologist",
+    DELETE: "admin",
+};
 
 export function ReportList({ currentRole }) {
     const [reports, setReports] = useState([]);
@@ -24,9 +31,18 @@ export function ReportList({ currentRole }) {
 
     const [pdfFile, setPdfFile] = useState(null);
 
+    const canView = REPORT_ROLES.VIEW.includes(currentRole);
+    const canUpdate = currentRole === REPORT_ROLES.UPDATE;
+    const canDelete = currentRole === REPORT_ROLES.DELETE;
+
     useEffect(() => {
-        load_reports();
-    }, [limit, offset]);
+        if (canView) {
+            load_reports();
+        } else {
+            setReports([]);
+            setError("You are not authorized to view reports.");
+        }
+    }, [limit, offset, currentRole]);
 
     async function load_reports() {
         setLoading(true);
@@ -35,14 +51,14 @@ export function ReportList({ currentRole }) {
         try {
             const params = new URLSearchParams();
 
-            params.set("limit", limit);
-            params.set("offset", offset);
+            params.set("limit", String(limit));
+            params.set("offset", String(offset));
 
             const data = await apiFetch(
                 `/v1/reports?${params.toString()}`
             );
 
-            setReports(data.items || data);
+            setReports(Array.isArray(data) ? data : data.items ?? []);
         } catch (err) {
             setError(err.message);
         } finally {
@@ -51,6 +67,8 @@ export function ReportList({ currentRole }) {
     }
 
     async function handleViewReport(reportId) {
+        if (!canView) return;
+
         setModalType("view");
         setSelectedReport(null);
         setModalError(null);
@@ -70,6 +88,8 @@ export function ReportList({ currentRole }) {
     }
 
     async function handleUpdateClick(reportId) {
+        if (!canUpdate) return;
+
         setModalType("update");
         setSelectedReport(null);
         setModalError(null);
@@ -101,10 +121,20 @@ export function ReportList({ currentRole }) {
     async function handleUpdateReport(event) {
         event.preventDefault();
 
-        if (!selectedReport) return;
+        if (!canUpdate || !selectedReport) return;
 
         if (!pdfFile) {
             setModalError("Please select the replacement PDF file.");
+            return;
+        }
+
+        if (pdfFile.type !== "application/pdf") {
+            setModalError("Only PDF files are allowed.");
+            return;
+        }
+
+        if (pdfFile.size > 20 * 1024 * 1024) {
+            setModalError("PDF file size must be 20 MB or less.");
             return;
         }
 
@@ -152,6 +182,8 @@ export function ReportList({ currentRole }) {
     }
 
     async function handleDeleteReport(reportId) {
+        if (!canDelete) return;
+
         const confirmed = window.confirm(
             "Are you sure you want to delete this report?"
         );
@@ -189,11 +221,22 @@ export function ReportList({ currentRole }) {
     }
 
     function offsetNext() {
-        setOffset(offset + limit);
+        setOffset((current) => current + limit);
     }
 
     function offsetPrev() {
-        setOffset(Math.max(0, offset - limit));
+        setOffset((current) => Math.max(0, current - limit));
+    }
+
+    if (!canView) {
+        return (
+            <div>
+                <h2>Report List</h2>
+                <p role="alert">
+                    You are not authorized to view reports.
+                </p>
+            </div>
+        );
     }
 
     return (
@@ -235,6 +278,7 @@ export function ReportList({ currentRole }) {
 
                                 <td>
                                     <button
+                                        type="button"
                                         onClick={() =>
                                             handleViewReport(report.id)
                                         }
@@ -242,8 +286,9 @@ export function ReportList({ currentRole }) {
                                         View
                                     </button>{" "}
 
-                                    {currentRole === "radiologist" && (
+                                    {canUpdate && (
                                         <button
+                                            type="button"
                                             onClick={() =>
                                                 handleUpdateClick(report.id)
                                             }
@@ -252,8 +297,9 @@ export function ReportList({ currentRole }) {
                                         </button>
                                     )}{" "}
 
-                                    {currentRole === "admin" && (
+                                    {canDelete && (
                                         <button
+                                            type="button"
                                             onClick={() =>
                                                 handleDeleteReport(report.id)
                                             }
@@ -270,6 +316,7 @@ export function ReportList({ currentRole }) {
 
             <div>
                 <button
+                    type="button"
                     onClick={offsetPrev}
                     disabled={offset === 0 || loading}
                 >
@@ -283,6 +330,7 @@ export function ReportList({ currentRole }) {
                 </span>
 
                 <button
+                    type="button"
                     onClick={offsetNext}
                     disabled={reports.length < limit || loading}
                 >
@@ -303,6 +351,7 @@ export function ReportList({ currentRole }) {
                     </h3>
 
                     {modalLoading && <p>Loading report...</p>}
+
                     {modalError && (
                         <p role="alert">Error: {modalError}</p>
                     )}
@@ -331,104 +380,117 @@ export function ReportList({ currentRole }) {
                             </dd>
 
                             <dt>PDF Storage Key</dt>
-                            <dd>{selectedReport.pdf_key}</dd>
+                            <dd>
+                                {selectedReport.pdf_key || "Not available"}
+                            </dd>
                         </dl>
                     )}
 
-                    {modalType === "update" && selectedReport && (
-                        <form onSubmit={handleUpdateReport}>
-                            <div>
-                                <label htmlFor="scan-id">
-                                    Scan ID:
-                                </label>
-                                <input
-                                    id="scan-id"
-                                    value={form.scan_id}
-                                    onChange={(event) =>
-                                        setForm({
-                                            ...form,
-                                            scan_id: event.target.value,
-                                        })
-                                    }
-                                    required
-                                />
-                            </div>
+                    {modalType === "update" &&
+                        canUpdate &&
+                        selectedReport && (
+                            <form onSubmit={handleUpdateReport}>
+                                <div>
+                                    <label htmlFor="report-scan-id">
+                                        Scan ID:
+                                    </label>
+                                    <input
+                                        id="report-scan-id"
+                                        value={form.scan_id}
+                                        onChange={(event) =>
+                                            setForm({
+                                                ...form,
+                                                scan_id: event.target.value,
+                                            })
+                                        }
+                                        required
+                                    />
+                                </div>
 
-                            <div>
-                                <label htmlFor="findings">
-                                    Findings:
-                                </label>
-                                <textarea
-                                    id="findings"
-                                    value={form.findings}
-                                    onChange={(event) =>
-                                        setForm({
-                                            ...form,
-                                            findings: event.target.value,
-                                        })
-                                    }
-                                    required
-                                />
-                            </div>
+                                <div>
+                                    <label htmlFor="report-findings">
+                                        Findings:
+                                    </label>
+                                    <textarea
+                                        id="report-findings"
+                                        value={form.findings}
+                                        onChange={(event) =>
+                                            setForm({
+                                                ...form,
+                                                findings: event.target.value,
+                                            })
+                                        }
+                                        required
+                                    />
+                                </div>
 
-                            <div>
-                                <label htmlFor="radiologist-id">
-                                    Radiologist ID:
-                                </label>
-                                <input
-                                    id="radiologist-id"
-                                    value={form.radiologist_id}
-                                    onChange={(event) =>
-                                        setForm({
-                                            ...form,
-                                            radiologist_id: event.target.value,
-                                        })
-                                    }
-                                    required
-                                />
-                            </div>
+                                <div>
+                                    <label htmlFor="report-radiologist-id">
+                                        Radiologist ID:
+                                    </label>
+                                    <input
+                                        id="report-radiologist-id"
+                                        value={form.radiologist_id}
+                                        onChange={(event) =>
+                                            setForm({
+                                                ...form,
+                                                radiologist_id:
+                                                    event.target.value,
+                                            })
+                                        }
+                                        required
+                                    />
+                                </div>
 
-                            <div>
-                                <label htmlFor="finalized-at">
-                                    Finalized At:
-                                </label>
-                                <input
-                                    id="finalized-at"
-                                    type="datetime-local"
-                                    value={form.finalized_at}
-                                    onChange={(event) =>
-                                        setForm({
-                                            ...form,
-                                            finalized_at: event.target.value,
-                                        })
-                                    }
-                                />
-                            </div>
+                                <div>
+                                    <label htmlFor="report-finalized-at">
+                                        Finalized At:
+                                    </label>
+                                    <input
+                                        id="report-finalized-at"
+                                        type="datetime-local"
+                                        value={form.finalized_at}
+                                        onChange={(event) =>
+                                            setForm({
+                                                ...form,
+                                                finalized_at:
+                                                    event.target.value,
+                                            })
+                                        }
+                                    />
+                                </div>
 
-                            <div>
-                                <label htmlFor="pdf-file">
-                                    Replacement PDF:
-                                </label>
-                                <input
-                                    id="pdf-file"
-                                    type="file"
-                                    accept="application/pdf"
-                                    onChange={(event) =>
-                                        setPdfFile(
-                                            event.target.files?.[0] || null
-                                        )
-                                    }
-                                    required
-                                />
-                            </div>
+                                <div>
+                                    <label htmlFor="report-pdf-file">
+                                        Replacement PDF:
+                                    </label>
+                                    <input
+                                        id="report-pdf-file"
+                                        type="file"
+                                        accept="application/pdf,.pdf"
+                                        onChange={(event) =>
+                                            setPdfFile(
+                                                event.target.files?.[0] ?? null
+                                            )
+                                        }
+                                        required
+                                    />
+                                </div>
 
-                            <button type="submit" disabled={saving}>
-                                {saving ? "Updating..." : "Save Changes"}
-                            </button>
-                        </form>
-                    )}
+                                <button
+                                    type="submit"
+                                    disabled={saving || modalLoading}
+                                >
+                                    {saving ? "Updating..." : "Save Changes"}
+                                </button>
+                            </form>
+                        )}
 
-                    <button onClick={closeModal}>
+                    <button
+                        type="button"
+                        onClick={closeModal}
+                        disabled={saving}
+                    >
                         Close
                     </button>
                 </div>

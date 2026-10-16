@@ -1,15 +1,16 @@
-import react from 'react';
-import { useState, useEffect } from 'react';
-import {apiFetch} from './api';
-import {ScanDetail} from './ScanDetail';
 
+import { useState, useEffect } from "react";
+import { apiFetch } from "./api";
+import { ScanDetail } from "./ScanDetail";
 
-export function ScanList() {
+export function ScanList({ role }) {
     const [scans, setScans] = useState([]);
-    const [modality, setModality] = useState('');
-    const [status, setStatus] = useState('');
+    const [modality, setModality] = useState("");
+    const [status, setStatus] = useState("");
     const [limit] = useState(10);
-    const [offset, setOffset] = useState(0);
+
+    const [cursor, setCursor] = useState(null);
+    const [cursorHistory, setCursorHistory] = useState([]);
 
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState(null);
@@ -17,66 +18,85 @@ export function ScanList() {
     const [selectedScanId, setSelectedScanId] = useState(null);
     const [showScanDetail, setShowScanDetail] = useState(false);
 
-
     useEffect(() => {
-        load_scans();
-    }, [modality, status, limit, offset]);
+        loadScans();
+    }, [modality, status, cursor]);
 
-
-    async function load_scans() {
+    async function loadScans() {
         setLoading(true);
         setError(null);
 
         try {
             const params = new URLSearchParams();
 
-            params.set('limit', limit);
-            params.set('offset', offset);
+            params.set("limit", String(limit));
+
+            if (cursor) {
+                params.set("cursor", cursor);
+            }
 
             if (modality) {
-                params.set('modality', modality);
+                params.set("modality", modality);
             }
 
             if (status) {
-                params.set('status', status);
+                params.set("status", status);
             }
 
             const data = await apiFetch(
                 `/v1/scans?${params.toString()}`
             );
 
-            setScans(data.items || data);
-
+            setScans(Array.isArray(data) ? data : data.items ?? []);
         } catch (err) {
             setError(err.message);
-
+            setScans([]);
         } finally {
             setLoading(false);
         }
     }
-
 
     function handleScanClick(scanId) {
         setSelectedScanId(scanId);
         setShowScanDetail(true);
     }
 
-
     function closeScanDetail() {
         setShowScanDetail(false);
         setSelectedScanId(null);
     }
 
+    function nextPage() {
+        if (scans.length < limit || loading) {
+            return;
+        }
 
-    function offestNext() {
-        setOffset(offset + limit);
+        const lastScan = scans[scans.length - 1];
+
+        if (!lastScan?.id) {
+            return;
+        }
+
+        setCursorHistory((previous) => [...previous, cursor]);
+        setCursor(lastScan.id);
     }
 
+    function previousPage() {
+        if (cursorHistory.length === 0 || loading) {
+            return;
+        }
 
-    function offsetPrev() {
-        setOffset(Math.max(0, offset - limit));
+        const previousHistory = [...cursorHistory];
+        const previousCursor = previousHistory.pop();
+
+        setCursorHistory(previousHistory);
+        setCursor(previousCursor);
     }
 
+    function resetPagination() {
+        setCursor(null);
+        setCursorHistory([]);
+    }
 
     return (
         <div>
@@ -85,12 +105,11 @@ export function ScanList() {
             <div>
                 <label>
                     Modality:
-
                     <select
                         value={modality}
                         onChange={(event) => {
                             setModality(event.target.value);
-                            setOffset(0);
+                            resetPagination();
                         }}
                     >
                         <option value="">All</option>
@@ -100,15 +119,13 @@ export function ScanList() {
                     </select>
                 </label>
 
-
                 <label>
                     Status:
-
                     <select
                         value={status}
                         onChange={(event) => {
                             setStatus(event.target.value);
-                            setOffset(0);
+                            resetPagination();
                         }}
                     >
                         <option value="">All</option>
@@ -120,16 +137,13 @@ export function ScanList() {
                 </label>
             </div>
 
-
             {loading && <p>Loading...</p>}
 
-            {error && <p>Error: {error}</p>}
-
+            {error && <p role="alert">Error: {error}</p>}
 
             {!loading && !error && scans.length === 0 && (
                 <p>No scans found.</p>
             )}
-
 
             {!loading && !error && scans.length > 0 && (
                 <table>
@@ -157,17 +171,15 @@ export function ScanList() {
                                 <td>{scan.body_part}</td>
                                 <td>{scan.acquired_at}</td>
                                 <td>
-                                    {scan.uploaded_at || 'Not uploaded'}
+                                    {scan.uploaded_at || "Not uploaded"}
                                 </td>
                                 <td>{scan.status}</td>
-                                <td>{scan.created_at}</td>
-                                <td>{scan.updated_at}</td>
-
+                                <td>{scan.created_at ?? "—"}</td>
+                                <td>{scan.updated_at ?? "—"}</td>
                                 <td>
                                     <button
-                                        onClick={() =>
-                                            handleScanClick(scan.id)
-                                        }
+                                        type="button"
+                                        onClick={() => handleScanClick(scan.id)}
                                     >
                                         View
                                     </button>
@@ -178,38 +190,40 @@ export function ScanList() {
                 </table>
             )}
 
-
             <div>
                 <button
-                    onClick={offsetPrev}
-                    disabled={offset === 0 || loading}
+                    type="button"
+                    onClick={previousPage}
+                    disabled={cursorHistory.length === 0 || loading}
                 >
                     Previous
                 </button>
 
                 <span>
-                    {" "}
-                    Page {Math.floor(offset / limit) + 1}
-                    {" "}
+                    {" "}Page {cursorHistory.length + 1}{" "}
                 </span>
 
                 <button
-                    onClick={offestNext}
+                    type="button"
+                    onClick={nextPage}
                     disabled={scans.length < limit || loading}
                 >
                     Next
                 </button>
             </div>
 
-
             {showScanDetail && selectedScanId && (
                 <ScanDetail
                     scanId={selectedScanId}
+                    role={role}
                 />
             )}
 
             {showScanDetail && (
-                <button onClick={closeScanDetail}>
+                <button
+                    type="button"
+                    onClick={closeScanDetail}
+                >
                     Close
                 </button>
             )}

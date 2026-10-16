@@ -1,7 +1,10 @@
+
 import { useEffect, useState } from "react";
 import { LoginScreen } from "./LoginScreen";
 import { ScanList } from "./ScanList";
 import { UploadScreen } from "./UploadScreen";
+import { ReportList } from "./ReportList";
+
 import {
     clearAuthToken,
     setUnauthorizedHandler,
@@ -9,10 +12,13 @@ import {
 
 function App() {
     const [loggedIn, setLoggedIn] = useState(false);
+    const [currentUser, setCurrentUser] = useState(null);
 
     useEffect(() => {
         setUnauthorizedHandler(() => {
+            clearAuthToken();
             setLoggedIn(false);
+            setCurrentUser(null);
         });
 
         return () => {
@@ -20,16 +26,22 @@ function App() {
         };
     }, []);
 
-    function handleLoginSuccess() {
+    function handleLoginSuccess(user) {
+        setCurrentUser({
+            userId: user.userId,
+            role: user.role,
+        });
+
         setLoggedIn(true);
     }
 
     function handleLogout() {
         clearAuthToken();
+        setCurrentUser(null);
         setLoggedIn(false);
     }
 
-    if (!loggedIn) {
+    if (!loggedIn || !currentUser) {
         return (
             <LoginScreen
                 onLoginSuccess={handleLoginSuccess}
@@ -39,13 +51,34 @@ function App() {
 
     return (
         <div>
-            <h1>ScanFlow</h1>
+            <header>
+                <h1>ScanFlow</h1>
 
-            <button onClick={handleLogout}>
-                Logout
-            </button>
-            <ScanList />
-            <UploadScreen />
+                <p>
+                    Role: <strong>{currentUser.role}</strong>
+                </p>
+
+                <button
+                    type="button"
+                    onClick={handleLogout}
+                >
+                    Logout
+                </button>
+            </header>
+
+            {currentUser.role === "clinician" && (
+                <UploadScreen
+                    role={currentUser.role}
+                />
+            )}
+
+            <ScanList
+                role={currentUser.role}
+            />
+
+            <ReportList
+                currentRole={currentUser.role}
+            />
         </div>
     );
 }
